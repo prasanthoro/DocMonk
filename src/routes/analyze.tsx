@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 
 import type { Clause, AnalysisResponse } from '../types/clauseAnalysis'
@@ -22,6 +22,75 @@ function newClause(title = '', category: Clause['category'] = 'financial'): Clau
   return { id: slugify(title) || uuidv4().slice(0, 8), title, category, value: '' }
 }
 
+function getDecisionStats(data: any): { total: number; decided: number } {
+  const blocks = Array.isArray(data?.blocks) ? data.blocks : []
+  const diffBlocks = blocks.filter((b: any) => b?.type === 'diffBlock')
+  const decided = diffBlocks.filter((b: any) => {
+    const decision = b?.data?.decision
+    return decision === 'approved' || decision === 'rejected'
+  }).length
+  return { total: diffBlocks.length, decided }
+}
+
+function resolveDocumentFromDiff(data: any) {
+  const blocks = Array.isArray(data?.blocks) ? data.blocks : []
+  const resolvedBlocks: Array<{ type: string; data: Record<string, unknown> }> = []
+
+  blocks.forEach((block: any) => {
+    if (!block || typeof block !== 'object') return
+
+    if (block.type !== 'diffBlock') {
+      resolvedBlocks.push(block)
+      return
+    }
+
+    const diffType = block?.data?.diffType
+    const decision = block?.data?.decision
+    const addedText = typeof block?.data?.addedText === 'string' ? block.data.addedText.trim() : ''
+    const deletedText = typeof block?.data?.deletedText === 'string' ? block.data.deletedText.trim() : ''
+
+    let finalText = ''
+    if (diffType === 'new') {
+      finalText = decision === 'approved' ? addedText : ''
+    } else if (decision === 'approved') {
+      finalText = addedText
+    } else if (decision === 'rejected') {
+      finalText = deletedText
+    }
+
+    if (finalText) {
+      resolvedBlocks.push({ type: 'paragraph', data: { text: finalText } })
+    }
+  })
+
+  return {
+    time: Date.now(),
+    blocks: resolvedBlocks,
+    version: data?.version || '2.31.4',
+  }
+}
+
+function editorDataToPlainText(data: any): string {
+  const blocks = Array.isArray(data?.blocks) ? data.blocks : []
+  return blocks
+    .map((block: any) => {
+      if (!block || typeof block !== 'object') return ''
+      if (block.type === 'paragraph' || block.type === 'header') return String(block?.data?.text || '').trim()
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function makeSafeFilename(name: string): string {
+  return name
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/[^a-z0-9-_]+/gi, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'document'
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 function AnalyzePage() {
@@ -39,6 +108,9 @@ function AnalyzePage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [result, setResult] = useState<AnalysisResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const decisionStats = useMemo(() => getDecisionStats(editorData), [editorData])
+  const canGenerateUpdatedDocument =
+    isReportMode && decisionStats.total > 0 && decisionStats.total === decisionStats.decided
 
   // ── File handling ──────────────────────────────────────────────────────────
 
@@ -127,6 +199,28 @@ function AnalyzePage() {
     }
   }
 
+  const handleGenerateUpdatedDocument = useCallback(() => {
+    if (!canGenerateUpdatedDocument) return
+
+    const resolvedData = resolveDocumentFromDiff(editorData)
+    setEditorData(resolvedData)
+    setIsReportMode(false)
+
+    const plainText = editorDataToPlainText(resolvedData)
+    if (!plainText) return
+
+    const baseName = makeSafeFilename(documentTitle || uploadedFile?.name || 'updated-document')
+    const blob = new Blob([plainText], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${baseName}-updated.txt`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }, [canGenerateUpdatedDocument, documentTitle, editorData, uploadedFile])
+
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -157,6 +251,14 @@ function AnalyzePage() {
               </>
             )}
           </button>
+          {canGenerateUpdatedDocument && (
+            <button
+              onClick={handleGenerateUpdatedDocument}
+              className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-700 active:scale-95"
+            >
+              Generate Updated Document
+            </button>
+          )}
         </div>
       </div>
 
