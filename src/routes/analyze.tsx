@@ -207,15 +207,15 @@ function AnalyzePage() {
               onTitleChange={setDocumentTitle}
               isReportMode={isReportMode}
             />
-
+            <AnalysisResults
+              result={result}
+              isLoading={isAnalyzing}
+              clauseCount={clauses.filter((c) => c.title.trim()).length || 4}
+            />
 
           </div>
 
-          <AnalysisResults
-            result={result}
-            isLoading={isAnalyzing}
-            clauseCount={clauses.filter((c) => c.title.trim()).length || 4}
-          />
+
         </div>
       </div>
     </div>

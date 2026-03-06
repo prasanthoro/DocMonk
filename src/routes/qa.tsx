@@ -34,6 +34,19 @@ interface Message {
   timestamp?: number
 }
 
+function normalizeSessionsPayload(data: unknown): QASession[] {
+  if (Array.isArray(data)) {
+    return data as QASession[]
+  }
+
+  if (data && typeof data === 'object' && 'sessions' in data) {
+    const sessions = (data as { sessions?: unknown }).sessions
+    return Array.isArray(sessions) ? (sessions as QASession[]) : []
+  }
+
+  return []
+}
+
 // Simple markdown renderer
 function renderMarkdown(text: string): string {
   if (!text) return ''
@@ -154,6 +167,7 @@ function SessionSidebar({
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const renameInputRef = useRef<HTMLInputElement>(null)
+  const sessionList = Array.isArray(sessions) ? sessions : []
 
   const startRename = (session: QASession) => {
     setRenamingId(session._id)
@@ -162,7 +176,7 @@ function SessionSidebar({
   }
 
   const commitRename = async (id: string) => {
-    if (renameValue.trim() && renameValue !== sessions.find((s) => s._id === id)?.name) {
+    if (renameValue.trim() && renameValue !== sessionList.find((s) => s._id === id)?.name) {
       await onRenameSession(id, renameValue.trim())
     }
     setRenamingId(null)
@@ -190,10 +204,10 @@ function SessionSidebar({
           <div className="flex items-center justify-center py-8">
             <div className="h-5 w-5 rounded-full border-2 border-indigo-300 border-t-indigo-600 animate-spin" />
           </div>
-        ) : sessions?.length === 0 ? (
+        ) : sessionList.length === 0 ? (
           <p className="text-center text-xs text-slate-400 py-8">No sessions yet</p>
         ) : (
-          sessions?.map((session) => (
+          sessionList.map((session) => (
             <div
               key={session._id}
               className={`group relative rounded-xl px-3 py-3 cursor-pointer transition ${activeSessionId === session._id
@@ -304,7 +318,7 @@ function NewSessionPanel({ onCreated }: { onCreated: (session: QASession) => voi
       const documents = await Promise.all(
         files.map(async (file) => ({
           document_id: uuidv4(),
-          s3_download_url: `data:application/octet-stream;base64,${await fileToBase64(file)}`,
+          document_base64: `data:application/octet-stream;base64,${await fileToBase64(file)}`,
           document_filename: file.name,
         }))
       )
@@ -676,7 +690,7 @@ function QAPage() {
     setIsLoadingSessions(true)
     try {
       const data = await getQASessionsAPI(SESSION_USER_ID)
-      setSessions(data.sessions || data || [])
+      setSessions(normalizeSessionsPayload(data))
     } catch {
       setSessions([])
     } finally {

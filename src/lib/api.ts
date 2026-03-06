@@ -1,9 +1,16 @@
-const BASE_URL = (import.meta as any).env?.VITE_API_URL || "https://docmonk-production.up.railway.app";
+const BASE_URL =
+  (import.meta as any).env?.VITE_API_URL ||
+  "https://docmonk-production.up.railway.app";
 
 export const analyzeAPI = async (payload: {
   document_base64: string;
   document_filename: string;
-  clauses: Array<{ id: string; category: string; title: string; value: string }>;
+  clauses: Array<{
+    id: string;
+    category: string;
+    title: string;
+    value: string;
+  }>;
 }) => {
   const res = await fetch(`${BASE_URL}/v1/analyze`, {
     method: "POST",
@@ -21,7 +28,9 @@ export const getJobAPI = async (jobId: string) => {
 };
 
 export const resumeJobAPI = async (jobId: string) => {
-  const res = await fetch(`${BASE_URL}/v1/jobs/${jobId}/resume`, { method: "POST" });
+  const res = await fetch(`${BASE_URL}/v1/jobs/${jobId}/resume`, {
+    method: "POST",
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 };
@@ -29,7 +38,11 @@ export const resumeJobAPI = async (jobId: string) => {
 // QA APIs
 export const createQASessionAPI = async (payload: {
   user_id: string;
-  documents: Array<{ document_id: string; s3_download_url: string; document_filename: string }>;
+  documents: Array<{
+    document_id: string;
+    document_base64: string;
+    document_filename: string;
+  }>;
 }) => {
   const res = await fetch(`${BASE_URL}/v1/qa/sessions`, {
     method: "POST",
@@ -47,13 +60,17 @@ export const getQASessionsAPI = async (userId: string) => {
 };
 
 export const getQASessionAPI = async (sessionId: string, page = 1) => {
-  const res = await fetch(`${BASE_URL}/v1/qa/sessions/${sessionId}?page=${page}&page_size=50`);
+  const res = await fetch(
+    `${BASE_URL}/v1/qa/sessions/${sessionId}?page=${page}&page_size=50`,
+  );
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 };
 
 export const deleteQASessionAPI = async (sessionId: string) => {
-  const res = await fetch(`${BASE_URL}/v1/qa/sessions/${sessionId}`, { method: "DELETE" });
+  const res = await fetch(`${BASE_URL}/v1/qa/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 };
@@ -73,7 +90,7 @@ export const askQAAPI = (
   question: string,
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (e: string) => void
+  onError: (e: string) => void,
 ) => {
   fetch(`${BASE_URL}/v1/qa/sessions/${sessionId}/ask`, {
     method: "POST",
@@ -124,17 +141,25 @@ export const askQAAPI = (
 };
 
 export const retryMessageAPI = async (messageId: string) => {
-  const res = await fetch(`${BASE_URL}/v1/qa/messages/${messageId}/retry`, { method: "POST" });
+  const res = await fetch(`${BASE_URL}/v1/qa/messages/${messageId}/retry`, {
+    method: "POST",
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 };
 
-export const regenerateMessageAPI = async (messageId: string, reason: string) => {
-  const res = await fetch(`${BASE_URL}/v1/qa/messages/${messageId}/regenerate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reason }),
-  });
+export const regenerateMessageAPI = async (
+  messageId: string,
+  reason: string,
+) => {
+  const res = await fetch(
+    `${BASE_URL}/v1/qa/messages/${messageId}/regenerate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+  );
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 };
