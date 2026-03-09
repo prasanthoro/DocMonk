@@ -1,54 +1,46 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { v4 as uuidv4 } from 'uuid'
 import {
-  createQASessionAPI,
-  getQASessionsAPI,
-  getQASessionAPI,
-  deleteQASessionAPI,
-  renameQASessionAPI,
   askQAAPI,
+  createQASessionAPI,
+  deleteQASessionAPI,
+  getQASessionAPI,
+  getQASessionsAPI,
+  regenerateMessageAPI,
+  renameQASessionAPI,
   retryMessageAPI,
+  type QADocument,
+  type QAMessageRecord,
+  type QASessionRecord,
 } from '../lib/api'
 
 export const Route = createFileRoute('/qa')({ component: QAPage })
 
-// A stable "user id" stored in memory for this session
 const SESSION_USER_ID = 'docmonk-user-' + Math.random().toString(36).slice(2)
 
-interface QASession {
-  _id: string
-  name: string
-  created_at?: string
-  documents?: Array<{ document_filename: string }>
-}
+type MessageStatus = 'streaming' | 'done' | 'error' | 'partial'
 
-interface Message {
+interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
   relevant_excerpt?: string
   page_hint?: string | number
-  status?: 'streaming' | 'done' | 'error' | 'partial'
-  timestamp?: number
+  status: MessageStatus
+  createdAt?: string
 }
 
-function normalizeSessionsPayload(data: unknown): QASession[] {
-  if (Array.isArray(data)) {
-    return data as QASession[]
-  }
-
-  if (data && typeof data === 'object' && 'sessions' in data) {
-    const sessions = (data as { sessions?: unknown }).sessions
-    return Array.isArray(sessions) ? (sessions as QASession[]) : []
-  }
-
-  return []
+interface LocalPreviewDoc {
+  document_id: string
+  document_filename: string
+  file_type?: string
+  previewUrl?: string
+  previewText?: string
 }
 
-// Simple markdown renderer
-function renderMarkdown(text: string): string {
+function renderMarkdown(text: string) {
   if (!text) return ''
   return text
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -57,94 +49,20 @@ function renderMarkdown(text: string): string {
     .replace(/\n/g, '<br/>')
 }
 
-function MessageBubble({
-  msg,
-  onRetry,
-}: {
-  msg: Message
-  onRetry?: (id: string) => void
-}) {
-  const [excerptOpen, setExcerptOpen] = useState(false)
-  const isUser = msg.role === 'user'
+function parseFileType(filename: string) {
+  return filename.split('.').pop()?.toLowerCase() || 'file'
+}
 
-  return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} gap-3`}>
-      {!isUser && (
-        <div className="flex-shrink-0 h-8 w-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 text-xs font-bold mt-1">
-          AI
-        </div>
-      )}
-
-      <div className={`max-w-[75%] ${isUser ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
-        <div
-          className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${isUser
-            ? 'bg-indigo-600 text-white rounded-tr-sm'
-            : msg.status === 'error'
-              ? 'bg-red-50 text-red-700 border border-red-200 rounded-tl-sm'
-              : 'bg-white border border-slate-200 text-slate-700 rounded-tl-sm shadow-sm'
-            }`}
-        >
-          {isUser ? (
-            <p className="whitespace-pre-wrap">{msg.content}</p>
-          ) : (
-            <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
-          )}
-
-          {msg.status === 'streaming' && (
-            <span className="inline-block w-1.5 h-4 bg-indigo-400 animate-pulse ml-0.5 rounded-sm" />
-          )}
-        </div>
-
-        {/* Relevant excerpt */}
-        {msg.relevant_excerpt && (
-          <div className="w-full">
-            <button
-              onClick={() => setExcerptOpen(!excerptOpen)}
-              className="text-xs text-slate-400 flex items-center gap-1 px-1 hover:text-slate-600 transition"
-            >
-              <svg
-                width="10" height="10"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                style={{ transform: excerptOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}
-              >
-                <path d="M6 9l6 6 6-6" />
-              </svg>
-              {excerptOpen ? 'Hide' : 'Show'} source excerpt
-              {msg.page_hint && ` (page ${msg.page_hint})`}
-            </button>
-            {excerptOpen && (
-              <blockquote className="mt-1 border-l-2 border-indigo-200 pl-3 text-xs text-slate-500 italic bg-slate-50 rounded-r-lg py-2 pr-3">
-                {msg.relevant_excerpt}
-              </blockquote>
-            )}
-          </div>
-        )}
-
-        {/* Retry button for errors */}
-        {msg.status === 'error' && onRetry && (
-          <button
-            onClick={() => onRetry(msg.id)}
-            className="text-xs font-semibold text-red-600 flex items-center gap-1 hover:text-red-800 transition px-1"
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="1 4 1 10 7 10" />
-              <path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
-            </svg>
-            Retry
-          </button>
-        )}
-      </div>
-
-      {isUser && (
-        <div className="flex-shrink-0 h-8 w-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 text-xs font-bold mt-1">
-          You
-        </div>
-      )}
-    </div>
-  )
+function mapMessageRecord(m: QAMessageRecord): ChatMessage {
+  return {
+    id: m.message_id,
+    role: m.role,
+    content: m.content || '',
+    relevant_excerpt: m.relevant_excerpt,
+    page_hint: m.page_hint,
+    status: 'done',
+    createdAt: m.created_at,
+  }
 }
 
 function SessionSidebar({
@@ -156,108 +74,94 @@ function SessionSidebar({
   onCreateSession,
   isLoading,
 }: {
-  sessions: QASession[]
+  sessions: QASessionRecord[]
   activeSessionId: string | null
   onSelectSession: (id: string) => void
   onDeleteSession: (id: string) => void
-  onRenameSession: (id: string, name: string) => void
+  onRenameSession: (id: string, name: string) => Promise<void>
   onCreateSession: () => void
   isLoading: boolean
 }) {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const renameInputRef = useRef<HTMLInputElement>(null)
-  const sessionList = Array.isArray(sessions) ? sessions : []
 
-  const startRename = (session: QASession) => {
-    setRenamingId(session._id)
-    setRenameValue(session.name)
-    setTimeout(() => renameInputRef.current?.focus(), 50)
+  const startRename = (session: QASessionRecord) => {
+    setRenamingId(session.session_id)
+    setRenameValue(session.name || '')
+    setTimeout(() => renameInputRef.current?.focus(), 60)
   }
 
-  const commitRename = async (id: string) => {
-    if (renameValue.trim() && renameValue !== sessionList.find((s) => s._id === id)?.name) {
-      await onRenameSession(id, renameValue.trim())
-    }
+  const commitRename = async (sessionId: string) => {
+    const trimmed = renameValue.trim()
+    if (trimmed) await onRenameSession(sessionId, trimmed)
     setRenamingId(null)
   }
 
   return (
-    <div className="flex flex-col h-full">
-      {/* New session button */}
-      <div className="p-4 border-b border-slate-100">
+    <div className="flex h-full flex-col">
+      <div className="border-b border-slate-100 p-4">
         <button
           onClick={onCreateSession}
-          className="w-full rounded-xl border-2 border-dashed border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-semibold text-indigo-600 transition hover:bg-indigo-100 flex items-center justify-center gap-2"
+          className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
+          <span className="text-base">+</span>
           New Session
         </button>
       </div>
 
-      {/* Session list */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-1">
+      <div className="flex-1 space-y-1 overflow-y-auto p-3">
         {isLoading ? (
-          <div className="flex items-center justify-center py-8">
-            <div className="h-5 w-5 rounded-full border-2 border-indigo-300 border-t-indigo-600 animate-spin" />
+          <div className="flex justify-center py-8">
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-600" />
           </div>
-        ) : sessionList.length === 0 ? (
-          <p className="text-center text-xs text-slate-400 py-8">No sessions yet</p>
+        ) : sessions.length === 0 ? (
+          <p className="py-8 text-center text-xs text-slate-400">No sessions found</p>
         ) : (
-          sessionList.map((session) => (
+          sessions.map((session) => (
             <div
-              key={session._id}
-              className={`group relative rounded-xl px-3 py-3 cursor-pointer transition ${activeSessionId === session._id
-                ? 'bg-indigo-50 border border-indigo-100'
-                : 'hover:bg-slate-50'
+              key={session.session_id}
+              className={`group relative cursor-pointer rounded-xl border px-3 py-3 transition ${activeSessionId === session.session_id
+                  ? 'border-indigo-100 bg-indigo-50'
+                  : 'border-transparent hover:bg-slate-50'
                 }`}
-              onClick={() => onSelectSession(session._id)}
+              onClick={() => onSelectSession(session.session_id)}
               onDoubleClick={() => startRename(session)}
             >
-              {renamingId === session._id ? (
+              {renamingId === session.session_id ? (
                 <input
                   ref={renameInputRef}
                   value={renameValue}
                   onChange={(e) => setRenameValue(e.target.value)}
-                  onBlur={() => commitRename(session._id)}
+                  onBlur={() => commitRename(session.session_id)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') commitRename(session._id)
+                    if (e.key === 'Enter') commitRename(session.session_id)
                     if (e.key === 'Escape') setRenamingId(null)
                   }}
                   onClick={(e) => e.stopPropagation()}
-                  className="w-full rounded-lg border border-indigo-300 px-2 py-1 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                  className="w-full rounded-lg border border-indigo-300 px-2 py-1 text-sm focus:outline-none"
                 />
               ) : (
                 <>
-                  <p className={`text-sm font-medium truncate ${activeSessionId === session._id ? 'text-indigo-700' : 'text-slate-700'}`}>
+                  <p className="truncate text-sm font-semibold text-slate-700">
                     {session.name || 'Untitled Session'}
                   </p>
-                  {session.documents && session.documents.length > 0 && (
-                    <p className="text-xs text-slate-400 truncate mt-0.5">
-                      {session.documents[0].document_filename}
-                      {session.documents.length > 1 && ` +${session.documents.length - 1}`}
-                    </p>
-                  )}
+                  <p className="mt-0.5 truncate text-xs text-slate-400">
+                    {session.documents?.[0]?.document_filename || 'No document'}
+                    {(session.documents?.length || 0) > 1 ? ` +${(session.documents?.length || 1) - 1}` : ''}
+                  </p>
                 </>
               )}
 
-              {/* Delete button */}
               <button
                 onClick={(e) => {
                   e.stopPropagation()
-                  onDeleteSession(session._id)
+                  onDeleteSession(session.session_id)
                 }}
-                className="absolute right-2 top-2.5 hidden group-hover:flex h-6 w-6 items-center justify-center rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-500 transition"
+                className="absolute right-2 top-2 hidden h-6 w-6 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600 group-hover:flex"
                 title="Delete session"
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="3 6 5 6 21 6" />
-                  <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
-                  <path d="M10 11v6M14 11v6" />
-                </svg>
+                ×
               </button>
             </div>
           ))
@@ -267,11 +171,19 @@ function SessionSidebar({
   )
 }
 
-function NewSessionPanel({ onCreated }: { onCreated: (session: QASession) => void }) {
+function NewSessionPanel({
+  onCreated,
+}: {
+  onCreated: (
+    session: QASessionRecord,
+    localPreviewDocs: LocalPreviewDoc[],
+    requestedName: string,
+  ) => void
+}) {
   const [files, setFiles] = useState<File[]>([])
   const [sessionName, setSessionName] = useState('')
-  const [isCreating, setIsCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [isCreating, setIsCreating] = useState(false)
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setFiles((prev) => [...prev, ...acceptedFiles])
@@ -289,64 +201,73 @@ function NewSessionPanel({ onCreated }: { onCreated: (session: QASession) => voi
     multiple: true,
   })
 
-  const removeFile = (idx: number) => {
-    setFiles((prev) => prev.filter((_, i) => i !== idx))
-  }
-
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
+  const fileToDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
       const reader = new FileReader()
-      reader.onload = () => {
-        const result = reader.result as string
-        resolve(result.split(',')[1] || result)
-      }
+      reader.onload = () => resolve(String(reader.result || ''))
       reader.onerror = reject
       reader.readAsDataURL(file)
     })
-  }
 
   const createSession = async () => {
     if (files.length === 0) {
       setError('Please upload at least one document.')
       return
     }
-
-    setIsCreating(true)
     setError(null)
+    setIsCreating(true)
 
     try {
-      const documents = await Promise.all(
-        files.map(async (file) => ({
-          document_id: uuidv4(),
-          document_base64: `data:application/octet-stream;base64,${await fileToBase64(file)}`,
-          document_filename: file.name,
-        }))
+      const docs = await Promise.all(
+        files.map(async (file) => {
+          const dataUrl = await fileToDataUrl(file)
+          const ext = parseFileType(file.name)
+          const previewText = ext === 'txt' ? (await file.text()).slice(0, 8000) : undefined
+          const previewUrl = ext === 'pdf' ? URL.createObjectURL(file) : undefined
+          const document_id = `uploads/local/${uuidv4()}-${file.name}`
+
+          return {
+            requestDoc: {
+              document_id,
+              document_base64: dataUrl,
+              document_filename: file.name,
+            },
+            localPreview: {
+              document_id,
+              document_filename: file.name,
+              file_type: ext,
+              previewText,
+              previewUrl,
+            } as LocalPreviewDoc,
+          }
+        }),
       )
 
       const session = await createQASessionAPI({
         user_id: SESSION_USER_ID,
-        documents,
+        documents: docs.map((d) => d.requestDoc),
       })
 
-      onCreated(session)
+      onCreated(
+        session,
+        docs.map((d) => d.localPreview),
+        sessionName.trim(),
+      )
     } catch (e: any) {
-      setError(e?.message || 'Failed to create session. Check your API configuration.')
+      setError(e?.message || 'Failed to create session.')
     } finally {
       setIsCreating(false)
     }
   }
 
   return (
-    <div className="flex flex-col items-center justify-center h-full p-8 max-w-lg mx-auto">
-      <div className="w-full space-y-5">
-        <div className="text-center">
-          <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-purple-100 text-purple-600 mb-4">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-            </svg>
-          </div>
-          <h2 className="text-xl font-bold text-slate-900 mb-1">Start a new Q&A session</h2>
-          <p className="text-sm text-slate-500">Upload documents and ask questions in plain English</p>
+    <div className="mx-auto flex h-full w-full max-w-2xl flex-col justify-center p-8">
+      <div className="space-y-5 rounded-3xl border border-slate-200 bg-white p-7 shadow-sm">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900">Create Q&A Session</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Upload one or more documents, then start asking questions.
+          </p>
         </div>
 
         <input
@@ -354,48 +275,33 @@ function NewSessionPanel({ onCreated }: { onCreated: (session: QASession) => voi
           placeholder="Session name (optional)"
           value={sessionName}
           onChange={(e) => setSessionName(e.target.value)}
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:border-purple-400 focus:outline-none focus:ring-2 focus:ring-purple-100"
+          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none"
         />
 
         <div
           {...getRootProps()}
-          className={`rounded-xl border-2 border-dashed p-8 text-center cursor-pointer transition ${isDragActive
-            ? 'border-purple-400 bg-purple-50'
-            : 'border-slate-200 bg-slate-50 hover:border-purple-300 hover:bg-purple-50/50'
+          className={`cursor-pointer rounded-xl border-2 border-dashed p-8 text-center transition ${isDragActive
+              ? 'border-indigo-400 bg-indigo-50'
+              : 'border-slate-200 bg-slate-50 hover:border-indigo-300 hover:bg-indigo-50/40'
             }`}
         >
           <input {...getInputProps()} />
-          <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-purple-100 text-purple-600 mb-3 mx-auto">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-              <polyline points="17 8 12 3 7 8" />
-              <line x1="12" y1="3" x2="12" y2="15" />
-            </svg>
-          </div>
-          <p className="text-sm font-medium text-slate-600 mb-1">
-            {isDragActive ? 'Drop files here' : 'Drop documents here'}
+          <p className="text-sm font-semibold text-slate-600">
+            {isDragActive ? 'Drop files here' : 'Drop documents or click to browse'}
           </p>
-          <p className="text-xs text-slate-400">PDF, DOCX, DOC, TXT — multiple files supported</p>
+          <p className="mt-1 text-xs text-slate-400">PDF, DOCX, DOC, TXT</p>
         </div>
 
         {files.length > 0 && (
           <div className="space-y-2">
             {files.map((file, idx) => (
-              <div key={idx} className="flex items-center gap-3 rounded-lg bg-slate-50 border border-slate-100 px-3 py-2">
-                <svg className="text-slate-400 flex-shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-                  <polyline points="14 2 14 8 20 8" />
-                </svg>
-                <span className="flex-1 text-sm text-slate-700 truncate">{file.name}</span>
-                <span className="text-xs text-slate-400">{(file.size / 1024).toFixed(0)} KB</span>
+              <div key={`${file.name}-${idx}`} className="flex items-center gap-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+                <span className="flex-1 truncate text-sm text-slate-700">{file.name}</span>
                 <button
-                  onClick={() => removeFile(idx)}
-                  className="text-slate-300 hover:text-red-500 transition"
+                  onClick={() => setFiles((prev) => prev.filter((_, i) => i !== idx))}
+                  className="text-slate-400 transition hover:text-red-600"
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="18" y1="6" x2="6" y2="18" />
-                    <line x1="6" y1="6" x2="18" y2="18" />
-                  </svg>
+                  Remove
                 </button>
               </div>
             ))}
@@ -411,384 +317,523 @@ function NewSessionPanel({ onCreated }: { onCreated: (session: QASession) => voi
         <button
           onClick={createSession}
           disabled={isCreating || files.length === 0}
-          className="w-full rounded-xl bg-purple-600 px-6 py-3.5 text-base font-bold text-white transition hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-purple-200"
+          className="w-full rounded-xl bg-indigo-600 px-6 py-3 text-sm font-bold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isCreating ? (
-            <>
-              <svg className="animate-spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12a9 9 0 11-6.219-8.56" />
-              </svg>
-              Creating session...
-            </>
-          ) : (
-            <>
-              Start Session
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M5 12h14M12 5l7 7-7 7" />
-              </svg>
-            </>
-          )}
+          {isCreating ? 'Creating session...' : 'Create Session'}
         </button>
       </div>
     </div>
   )
 }
 
-function ChatPanel({
+function DocumentPreviewPanel({
+  session,
+  localDocs,
+}: {
+  session: QASessionRecord | null
+  localDocs: LocalPreviewDoc[]
+}) {
+  const docs = session?.documents || []
+  const [selectedId, setSelectedId] = useState<string | null>(docs[0]?.document_id || null)
+
+  useEffect(() => {
+    setSelectedId(docs[0]?.document_id || null)
+  }, [session?.session_id, docs.length])
+
+  const selectedDoc = docs.find((d) => d.document_id === selectedId) || docs[0]
+  const localDoc =
+    localDocs.find((d) => d.document_id === selectedDoc?.document_id) ||
+    localDocs.find((d) => d.document_filename === selectedDoc?.document_filename)
+
+  return (
+    <div className="flex h-full min-h-0 flex-col rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="border-b border-slate-100 px-5 py-3.5">
+        <h3 className="text-sm font-bold text-slate-800">Document Preview</h3>
+        <p className="mt-0.5 text-xs text-slate-400">
+          {docs.length} document{docs.length !== 1 ? 's' : ''} in this session
+        </p>
+      </div>
+
+      {docs.length > 1 && (
+        <div className="flex gap-2 overflow-x-auto border-b border-slate-100 px-4 py-2">
+          {docs.map((doc) => (
+            <button
+              key={doc.document_id}
+              onClick={() => setSelectedId(doc.document_id)}
+              className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${selectedDoc?.document_id === doc.document_id
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+                }`}
+            >
+              {doc.document_filename}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        {!selectedDoc ? (
+          <p className="text-sm text-slate-400">No document available.</p>
+        ) : localDoc?.previewUrl ? (
+          <iframe
+            title={selectedDoc.document_filename}
+            src={localDoc.previewUrl}
+            className="h-full min-h-[500px] w-full rounded-xl border border-slate-200"
+          />
+        ) : localDoc?.previewText ? (
+          <pre className="whitespace-pre-wrap rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-relaxed text-slate-700">
+            {localDoc.previewText}
+          </pre>
+        ) : (
+          <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <p className="text-sm font-semibold text-slate-700">{selectedDoc.document_filename}</p>
+            <div className="grid grid-cols-2 gap-3 text-xs text-slate-500">
+              <div>
+                <p className="text-slate-400">Document ID</p>
+                <p className="truncate">{selectedDoc.document_id}</p>
+              </div>
+              <div>
+                <p className="text-slate-400">Type</p>
+                <p>{selectedDoc.file_type || parseFileType(selectedDoc.document_filename)}</p>
+              </div>
+              <div>
+                <p className="text-slate-400">Extracted chars</p>
+                <p>{selectedDoc.char_count ?? '—'}</p>
+              </div>
+            </div>
+            <p className="rounded-lg bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
+              Live preview is unavailable for this file source. You can still ask questions against indexed content.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function MessageBubble({
+  msg,
+  onRetry,
+  onRegenerate,
+}: {
+  msg: ChatMessage
+  onRetry?: (id: string) => void
+  onRegenerate?: (id: string) => void
+}) {
+  const [excerptOpen, setExcerptOpen] = useState(false)
+  const isUser = msg.role === 'user'
+
+  return (
+    <div className={`flex gap-3 ${isUser ? 'justify-end' : 'justify-start'}`}>
+      {!isUser && (
+        <div className="mt-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-700">
+          AI
+        </div>
+      )}
+
+      <div className={`flex max-w-[80%] flex-col gap-1 ${isUser ? 'items-end' : 'items-start'}`}>
+        <div
+          className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${isUser
+              ? 'rounded-tr-sm bg-indigo-600 text-white'
+              : msg.status === 'error'
+                ? 'rounded-tl-sm border border-red-200 bg-red-50 text-red-700'
+                : msg.status === 'partial'
+                  ? 'rounded-tl-sm border border-amber-200 bg-amber-50 text-amber-800'
+                  : 'rounded-tl-sm border border-slate-200 bg-white text-slate-700 shadow-sm'
+            }`}
+        >
+          {isUser ? (
+            <p className="whitespace-pre-wrap">{msg.content}</p>
+          ) : (
+            <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+          )}
+          {msg.status === 'streaming' && (
+            <span className="ml-1 inline-block h-4 w-1.5 animate-pulse rounded-sm bg-indigo-400" />
+          )}
+        </div>
+
+        {msg.relevant_excerpt && (
+          <div>
+            <button
+              onClick={() => setExcerptOpen((v) => !v)}
+              className="px-1 text-xs text-slate-400 transition hover:text-slate-600"
+            >
+              {excerptOpen ? 'Hide source excerpt' : 'Show source excerpt'}
+              {msg.page_hint ? ` (page ${msg.page_hint})` : ''}
+            </button>
+            {excerptOpen && (
+              <blockquote className="mt-1 rounded-r-lg border-l-2 border-indigo-200 bg-slate-50 py-2 pl-3 pr-3 text-xs italic text-slate-500">
+                {msg.relevant_excerpt}
+              </blockquote>
+            )}
+          </div>
+        )}
+
+        {!isUser && (msg.status === 'error' || msg.status === 'partial') && (
+          <div className="flex items-center gap-2">
+            {onRetry && (
+              <button
+                onClick={() => onRetry(msg.id)}
+                className="rounded-lg border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-100"
+              >
+                Retry
+              </button>
+            )}
+            {onRegenerate && (
+              <button
+                onClick={() => onRegenerate(msg.id)}
+                className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-100"
+              >
+                Regenerate
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function SessionWorkspace({
   sessionId,
-  onBack,
+  localPreviewDocs,
+  onSessionMetaUpdate,
 }: {
   sessionId: string
-  onBack: () => void
+  localPreviewDocs: LocalPreviewDoc[]
+  onSessionMetaUpdate: (next: Partial<QASessionRecord> & { session_id: string }) => void
 }) {
-  const [messages, setMessages] = useState<Message[]>([])
+  const [sessionMeta, setSessionMeta] = useState<QASessionRecord | null>(null)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
   const [isStreaming, setIsStreaming] = useState(false)
-  const [isLoadingHistory, setIsLoadingHistory] = useState(true)
+  const [notice, setNotice] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  useEffect(() => scrollToBottom(), [messages])
+
+  const loadSession = useCallback(async () => {
+    setIsLoading(true)
+    try {
+      const data = await getQASessionAPI(sessionId, 1, 100)
+      const meta: QASessionRecord = {
+        session_id: data.session_id,
+        name: data.name,
+        user_id: data.user_id,
+        documents: data.documents || [],
+        created_at: data.created_at,
+        updated_at: data.updated_at,
+      }
+      setSessionMeta(meta)
+      onSessionMetaUpdate(meta)
+      setMessages((data.records || []).map(mapMessageRecord))
+    } catch (e: any) {
+      setNotice(e?.message || 'Failed to load session.')
+      setMessages([])
+    } finally {
+      setIsLoading(false)
+    }
+  }, [onSessionMetaUpdate, sessionId])
+
+  useEffect(() => {
+    loadSession()
+  }, [loadSession])
+
+  const runStream = async (
+    updaterId: string,
+    runner: (callbacks: {
+      onChunk: (text: string) => void
+      onEvent: (event: 'done' | 'partial' | 'error', data: Record<string, any> | null) => void
+    }) => Promise<void>,
+  ) => {
+    setIsStreaming(true)
+    setNotice(null)
+    try {
+      await runner({
+        onChunk: (chunk) => {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === updaterId ? { ...m, content: m.content + chunk } : m)),
+          )
+        },
+        onEvent: (event, data) => {
+          if (event === 'done') {
+            if (data?.data?.status === 'no_failures') {
+              setNotice('No failed or partial answers found to retry.')
+            }
+            setMessages((prev) =>
+              prev.map((m) => (m.id === updaterId ? { ...m, status: 'done' } : m)),
+            )
+          } else if (event === 'partial') {
+            const msg =
+              data?.message ||
+              'Answer was cut short due to a provider/network issue. Try regenerate.'
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === updaterId ? { ...m, status: 'partial', content: m.content || msg } : m,
+              ),
+            )
+          } else if (event === 'error') {
+            const msg = data?.message || 'Streaming failed.'
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === updaterId ? { ...m, status: 'error', content: m.content || msg } : m,
+              ),
+            )
+          }
+        },
+      })
+      setTimeout(() => {
+        loadSession()
+      }, 300)
+    } catch (e: any) {
+      const msg = e?.message || 'Streaming request failed.'
+      setMessages((prev) =>
+        prev.map((m) => (m.id === updaterId ? { ...m, status: 'error', content: msg } : m)),
+      )
+      setNotice(msg)
+    } finally {
+      setIsStreaming(false)
+    }
   }
 
-  useEffect(() => {
-    scrollToBottom()
-  }, [messages])
-
-  // Load session history
-  useEffect(() => {
-    const loadHistory = async () => {
-      setIsLoadingHistory(true)
-      try {
-        const data = await getQASessionAPI(sessionId)
-        const history: Message[] = (data.messages || data.history || []).map((m: any) => ({
-          id: m._id || uuidv4(),
-          role: m.role || (m.is_user ? 'user' : 'assistant'),
-          content: m.content || m.message || '',
-          relevant_excerpt: m.relevant_excerpt,
-          page_hint: m.page_hint,
-          status: 'done',
-          timestamp: m.created_at ? new Date(m.created_at).getTime() : Date.now(),
-        }))
-        setMessages(history)
-      } catch (e) {
-        // Session may be brand new
-        setMessages([])
-      } finally {
-        setIsLoadingHistory(false)
-      }
-    }
-    loadHistory()
-  }, [sessionId])
-
-  const sendMessage = () => {
+  const sendMessage = async () => {
     const question = input.trim()
     if (!question || isStreaming) return
 
     setInput('')
 
-    // Add user message
-    const userMsg: Message = {
+    const userMsg: ChatMessage = {
       id: uuidv4(),
       role: 'user',
       content: question,
       status: 'done',
-      timestamp: Date.now(),
     }
-
-    // Add placeholder assistant message
-    const assistantMsgId = uuidv4()
-    const assistantMsg: Message = {
+    const assistantMsgId = `tmp-${uuidv4()}`
+    const assistantMsg: ChatMessage = {
       id: assistantMsgId,
       role: 'assistant',
       content: '',
       status: 'streaming',
-      timestamp: Date.now(),
     }
-
     setMessages((prev) => [...prev, userMsg, assistantMsg])
-    setIsStreaming(true)
 
-    askQAAPI(
-      sessionId,
-      question,
-      (chunk) => {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantMsgId
-              ? { ...m, content: m.content + chunk }
-              : m
-          )
-        )
-      },
-      () => {
-        setIsStreaming(false)
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantMsgId ? { ...m, status: 'done' } : m
-          )
-        )
-      },
-      (err) => {
-        setIsStreaming(false)
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantMsgId
-              ? { ...m, content: err || 'An error occurred.', status: 'error' }
-              : m
-          )
-        )
-      }
+    await runStream(assistantMsgId, (callbacks) => askQAAPI(sessionId, question, callbacks))
+  }
+
+  const retryMessage = async (messageId: string) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === messageId ? { ...m, content: '', status: 'streaming' } : m)),
+    )
+    await runStream(messageId, (callbacks) => retryMessageAPI(messageId, callbacks))
+  }
+
+  const regenerateMessage = async (messageId: string) => {
+    const reason = window.prompt('Regeneration reason (min 3 chars):', 'Please provide a more specific answer with exact clauses.')
+    if (!reason || reason.trim().length < 3) return
+    setMessages((prev) =>
+      prev.map((m) => (m.id === messageId ? { ...m, content: '', status: 'streaming' } : m)),
+    )
+    await runStream(messageId, (callbacks) =>
+      regenerateMessageAPI(messageId, reason.trim(), callbacks),
     )
   }
 
-  const handleRetry = async (messageId: string) => {
-    try {
-      const response = await retryMessageAPI(messageId)
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === messageId
-            ? { ...m, content: response.content || '', status: 'done' }
-            : m
-        )
-      )
-    } catch (e) {
-      // silently fail
-    }
-  }
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      sendMessage()
-    }
-  }
-
   return (
-    <div className="flex flex-col h-full">
-      {/* Chat header */}
-      <div className="flex items-center gap-3 border-b border-slate-100 px-5 py-3.5 bg-white">
-        <button
-          onClick={onBack}
-          className="lg:hidden rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 transition"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M19 12H5M12 5l-7 7 7 7" />
-          </svg>
-        </button>
-        <div className="h-8 w-8 rounded-full bg-purple-100 flex items-center justify-center text-purple-600">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-          </svg>
+    <div className="grid h-full min-h-0 grid-cols-1 gap-4 bg-slate-50 p-4 xl:grid-cols-[1.1fr_1fr]">
+      <DocumentPreviewPanel session={sessionMeta} localDocs={localPreviewDocs} />
+
+      <div className="flex min-h-0 flex-col rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-100 px-5 py-3.5">
+          <p className="text-sm font-bold text-slate-800">Q&A Assistant</p>
+          <p className="mt-0.5 text-xs text-slate-400">
+            {sessionMeta?.name || 'Ask questions from the document context'}
+          </p>
         </div>
-        <p className="text-sm font-semibold text-slate-700">Document Q&A</p>
-      </div>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-slate-50">
-        {isLoadingHistory ? (
-          <div className="flex items-center justify-center py-12">
-            <div className="h-6 w-6 rounded-full border-2 border-purple-300 border-t-purple-600 animate-spin" />
-          </div>
-        ) : messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-purple-100 text-purple-600 mb-4">
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-              </svg>
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto bg-slate-50 p-5">
+          {isLoading ? (
+            <div className="flex justify-center py-12">
+              <div className="h-6 w-6 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-600" />
             </div>
-            <h3 className="text-base font-bold text-slate-700 mb-2">Ask anything about your documents</h3>
-            <p className="text-sm text-slate-400 max-w-xs">
-              Ask questions in plain English and get instant AI-powered answers with source references.
-            </p>
-
-            {/* Suggested questions */}
-            <div className="mt-6 flex flex-wrap gap-2 justify-center">
-              {[
-                'What are the payment terms?',
-                'When does this contract expire?',
-                'What are the termination conditions?',
-                'Who are the parties involved?',
-              ].map((q) => (
-                <button
-                  key={q}
-                  onClick={() => { setInput(q); textareaRef.current?.focus() }}
-                  className="rounded-full border border-purple-100 bg-white px-4 py-2 text-xs font-medium text-purple-600 hover:bg-purple-50 transition"
-                >
-                  {q}
-                </button>
-              ))}
+          ) : messages.length === 0 ? (
+            <div className="py-16 text-center">
+              <p className="text-sm font-semibold text-slate-700">No messages yet</p>
+              <p className="mt-1 text-sm text-slate-400">Ask your first question to start the conversation.</p>
             </div>
-          </div>
-        ) : (
-          <>
-            {messages.map((msg) => (
+          ) : (
+            messages.map((msg) => (
               <MessageBubble
                 key={msg.id}
                 msg={msg}
-                onRetry={msg.status === 'error' ? handleRetry : undefined}
+                onRetry={msg.role === 'assistant' ? retryMessage : undefined}
+                onRegenerate={msg.role === 'assistant' ? regenerateMessage : undefined}
               />
-            ))}
-          </>
-        )}
-        <div ref={messagesEndRef} />
-      </div>
+            ))
+          )}
 
-      {/* Input */}
-      <div className="border-t border-slate-100 bg-white p-4">
-        <div className="flex items-end gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 focus-within:border-purple-300 focus-within:ring-2 focus-within:ring-purple-100 transition">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask a question about your documents... (Enter to send, Shift+Enter for new line)"
-            rows={1}
-            className="flex-1 resize-none bg-transparent text-sm text-slate-800 placeholder-slate-400 focus:outline-none min-h-[24px] max-h-[120px]"
-            style={{ height: 'auto' }}
-            onInput={(e) => {
-              const target = e.target as HTMLTextAreaElement
-              target.style.height = 'auto'
-              target.style.height = `${Math.min(target.scrollHeight, 120)}px`
-            }}
-            disabled={isStreaming}
-          />
-          <button
-            onClick={sendMessage}
-            disabled={!input.trim() || isStreaming}
-            className="flex-shrink-0 h-9 w-9 rounded-xl bg-purple-600 flex items-center justify-center text-white transition hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {isStreaming ? (
-              <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12a9 9 0 11-6.219-8.56" />
-              </svg>
-            ) : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13" />
-                <polygon points="22 2 15 22 11 13 2 9 22 2" />
-              </svg>
-            )}
-          </button>
+          {notice && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+              {notice}
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
         </div>
-        <p className="text-xs text-slate-400 mt-2 text-center">
-          Press Enter to send, Shift+Enter for new line
-        </p>
+
+        <div className="border-t border-slate-100 bg-white p-4">
+          <div className="flex items-end gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 transition focus-within:border-indigo-300">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  sendMessage()
+                }
+              }}
+              placeholder="Ask a question about this session..."
+              rows={1}
+              onInput={(e) => {
+                const target = e.target as HTMLTextAreaElement
+                target.style.height = 'auto'
+                target.style.height = `${Math.min(target.scrollHeight, 120)}px`
+              }}
+              className="min-h-[24px] max-h-[120px] flex-1 resize-none bg-transparent text-sm text-slate-800 placeholder-slate-400 focus:outline-none"
+              disabled={isStreaming}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={isStreaming || !input.trim()}
+              className="h-9 w-9 flex-shrink-0 rounded-xl bg-indigo-600 text-sm font-bold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isStreaming ? '...' : '↗'}
+            </button>
+          </div>
+          <p className="mt-2 text-center text-xs text-slate-400">Enter to send, Shift+Enter for newline</p>
+        </div>
       </div>
     </div>
   )
 }
 
 function QAPage() {
-  const [sessions, setSessions] = useState<QASession[]>([])
+  const [sessions, setSessions] = useState<QASessionRecord[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [isLoadingSessions, setIsLoadingSessions] = useState(true)
   const [showNewSession, setShowNewSession] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [localPreviewMap, setLocalPreviewMap] = useState<Record<string, LocalPreviewDoc[]>>({})
 
-  const loadSessions = async () => {
+  const loadSessions = useCallback(async () => {
     setIsLoadingSessions(true)
     try {
-      const data = await getQASessionsAPI(SESSION_USER_ID)
-      setSessions(normalizeSessionsPayload(data))
+      const data = await getQASessionsAPI(SESSION_USER_ID, 1, 50)
+      setSessions(data.records || [])
     } catch {
       setSessions([])
     } finally {
       setIsLoadingSessions(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
     loadSessions()
+  }, [loadSessions])
+
+  const handleRenameSession = useCallback(async (id: string, name: string) => {
+    const updated = await renameQASessionAPI(id, name)
+    setSessions((prev) =>
+      prev.map((s) => (s.session_id === id ? { ...s, name: updated.name || name } : s)),
+    )
   }, [])
 
-  const handleSelectSession = (id: string) => {
-    setActiveSessionId(id)
-    setShowNewSession(false)
-  }
-
-  const handleDeleteSession = async (id: string) => {
-    try {
+  const handleDeleteSession = useCallback(
+    async (id: string) => {
       await deleteQASessionAPI(id)
-      setSessions((prev) => prev.filter((s) => s._id !== id))
+      setSessions((prev) => prev.filter((s) => s.session_id !== id))
       if (activeSessionId === id) setActiveSessionId(null)
-    } catch {
-      // silently fail
-    }
-  }
+    },
+    [activeSessionId],
+  )
 
-  const handleRenameSession = async (id: string, name: string) => {
-    try {
-      await renameQASessionAPI(id, name)
-      setSessions((prev) =>
-        prev.map((s) => (s._id === id ? { ...s, name } : s))
-      )
-    } catch {
-      // silently fail
-    }
-  }
+  const handleSessionCreated = useCallback(
+    async (session: QASessionRecord, previews: LocalPreviewDoc[], requestedName: string) => {
+      if (requestedName) {
+        try {
+          const renamed = await renameQASessionAPI(session.session_id, requestedName)
+          session = { ...session, name: renamed.name || requestedName }
+        } catch {
+          session = { ...session, name: requestedName }
+        }
+      }
 
-  const handleSessionCreated = (session: QASession) => {
-    setSessions((prev) => [session, ...prev])
-    setActiveSessionId(session._id)
-    setShowNewSession(false)
-  }
-
-  const handleCreateNew = () => {
-    setShowNewSession(true)
-    setActiveSessionId(null)
-  }
+      setLocalPreviewMap((prev) => ({ ...prev, [session.session_id]: previews }))
+      setSessions((prev) => [session, ...prev])
+      setActiveSessionId(session.session_id)
+      setShowNewSession(false)
+    },
+    [],
+  )
 
   return (
     <div className="flex h-[calc(100vh-64px)] overflow-hidden bg-white">
-      {/* Sidebar */}
-      <div className={`${sidebarOpen ? 'w-72' : 'w-0'} flex-shrink-0 border-r border-slate-100 overflow-hidden transition-all duration-300`}>
-        <div className="h-full w-72">
-          <div className="border-b border-slate-100 px-4 py-3.5 flex items-center justify-between">
+      <div className={`${sidebarOpen ? 'w-72' : 'w-0'} flex-shrink-0 overflow-hidden border-r border-slate-100 transition-all duration-300`}>
+        <div className="flex h-full w-72 flex-col">
+          <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3.5">
             <h2 className="text-sm font-bold text-slate-700">Sessions</h2>
             <button
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 transition"
+              onClick={() => setSidebarOpen((v) => !v)}
+              className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M19 12H5M12 5l-7 7 7 7" />
-              </svg>
+              ←
             </button>
           </div>
           <SessionSidebar
             sessions={sessions}
             activeSessionId={activeSessionId}
-            onSelectSession={handleSelectSession}
+            onSelectSession={(id) => {
+              setShowNewSession(false)
+              setActiveSessionId(id)
+            }}
             onDeleteSession={handleDeleteSession}
             onRenameSession={handleRenameSession}
-            onCreateSession={handleCreateNew}
+            onCreateSession={() => {
+              setShowNewSession(true)
+              setActiveSessionId(null)
+            }}
             isLoading={isLoadingSessions}
           />
         </div>
       </div>
 
-      {/* Main content */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="relative flex min-w-0 flex-1 flex-col">
         {!sidebarOpen && (
           <button
             onClick={() => setSidebarOpen(true)}
-            className="absolute left-0 top-20 z-10 rounded-r-lg border border-l-0 border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-50 transition shadow-sm"
+            className="absolute left-0 top-20 z-10 rounded-r-lg border border-l-0 border-slate-200 bg-white px-2 py-2 text-slate-500 shadow-sm transition hover:bg-slate-50"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M5 12h14M12 5l7 7-7 7" />
-            </svg>
+            →
           </button>
         )}
 
-        {showNewSession || (!activeSessionId && !showNewSession) ? (
+        {showNewSession || !activeSessionId ? (
           <NewSessionPanel onCreated={handleSessionCreated} />
-        ) : activeSessionId ? (
-          <ChatPanel
+        ) : (
+          <SessionWorkspace
             key={activeSessionId}
             sessionId={activeSessionId}
-            onBack={() => setActiveSessionId(null)}
+            localPreviewDocs={localPreviewMap[activeSessionId] || []}
+            onSessionMetaUpdate={(next) => {
+              setSessions((prev) =>
+                prev.map((s) => (s.session_id === next.session_id ? { ...s, ...next } : s)),
+              )
+            }}
           />
-        ) : null}
+        )}
       </div>
     </div>
   )

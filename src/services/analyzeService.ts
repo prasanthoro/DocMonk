@@ -13,22 +13,17 @@ export async function buildDocumentBase64(
   file: File | null,
   editorData: any
 ): Promise<{ b64: string; filename: string }> {
-  const ext = file?.name.split('.').pop()?.toLowerCase()
-
-  // PDF / TXT / MD → raw file bytes as base64
-  if (file && (ext === 'pdf' || ext === 'txt' || ext === 'md')) {
+  // Always prefer raw file bytes when a file is available
+  if (file) {
     const b64 = await fileToBase64(file)
     return { b64, filename: file.name }
   }
 
-  // DOCX (parsed to editorData) or manually typed content → EditorJS → HTML → base64
+  // Fallback: manually typed content → EditorJS → HTML → base64
   if (editorData?.blocks?.length) {
     const html = editorjsToHtml(editorData)
     const b64 = encodeBase64(html)
-    return {
-      b64,
-      filename: file?.name || 'document.html',
-    }
+    return { b64, filename: 'document.html' }
   }
 
   throw new Error('No document content. Please upload a file or type your contract in the editor.')
@@ -59,7 +54,8 @@ export function validateClauses(clauses: Clause[]): string | null {
 export async function analyzeDocument(
   file: File | null,
   editorData: any,
-  clauses: Clause[]
+  clauses: Clause[],
+  context?: string
 ): Promise<AnalysisResponse> {
   const validClauses = clauses.filter((c) => c.title.trim() && c.value.trim())
 
@@ -69,19 +65,22 @@ export async function analyzeDocument(
   const timeout = setTimeout(() => controller.abort(), ANALYZE_TIMEOUT_MS)
 
   try {
+    const body: Record<string, any> = {
+      document_base64: b64,
+      document_filename: filename,
+      clauses: validClauses.map((c) => ({
+        id: c.id.trim(),
+        category: c.category,
+        title: c.title.trim(),
+        value: c.value.trim(),
+      })),
+    }
+    if (context?.trim()) body.context = context.trim()
+
     const res = await fetch(`${BASE_URL}/v1/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        document_base64: b64,
-        document_filename: filename,
-        clauses: validClauses.map((c) => ({
-          id: c.id.trim(),
-          category: c.category,
-          title: c.title.trim(),
-          value: c.value.trim(),
-        })),
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     })
 

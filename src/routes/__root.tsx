@@ -34,7 +34,6 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <HeadContent />
       </head>
       <body className="font-sans antialiased bg-white text-slate-900 min-h-screen">
-        <Header />
         <main className="min-h-[calc(100vh-64px)]">
           {children}
         </main>

@@ -264,6 +264,8 @@ export default class DiffBlockTool {
   private _decide(decision: DiffDecision) {
     this.data.decision = decision
     this._build()
+    // Dispatch a bubbling DOM event so EditorComponent can trigger an EditorJS save
+    this.wrapper.dispatchEvent(new CustomEvent('diff-decision-change', { bubbles: true, composed: true }))
     this.onDecisionChange?.()
   }
 }

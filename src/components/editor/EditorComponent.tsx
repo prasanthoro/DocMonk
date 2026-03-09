@@ -180,7 +180,17 @@ export default function EditorComponent({
   // ── Sync externally-driven data (e.g. DOCX parse result) ──────────────────
 
   useEffect(() => {
-    if (!isReady || !editorRef.current || !data || !data.blocks?.length) return;
+    if (!isReady || !editorRef.current) return;
+
+    // Clear the editor when data is reset to null/empty
+    if (!data || !data.blocks?.length) {
+      if (lastDataRef.current !== '') {
+        lastDataRef.current = '';
+        editorRef.current?.clear().catch(() => {});
+      }
+      return;
+    }
+
     const incoming = JSON.stringify(data);
     if (incoming === lastDataRef.current) return;
 
@@ -207,6 +217,25 @@ export default function EditorComponent({
       (editorRef.current as any).readOnly?.toggle(readOnly);
     }
   }, [readOnly, isReady]);
+
+  // ── DiffBlock decision → propagate to React state ─────────────────────────
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !isReady) return;
+    const handler = async () => {
+      if (!mountedRef.current || !editorRef.current) return;
+      try {
+        const saved = await editorRef.current.save();
+        if (!saved) return;
+        lastDataRef.current = JSON.stringify(saved);
+        onChangeRef.current?.(saved as EditorData);
+      } catch { /* ignore */ }
+    };
+    container.addEventListener('diff-decision-change', handler);
+    return () => container.removeEventListener('diff-decision-change', handler);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReady]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
