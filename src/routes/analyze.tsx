@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, lazy, Suspense } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 
 import type { Clause, AnalysisResponse } from '../types/clauseAnalysis'
@@ -9,14 +9,21 @@ import { parseTxtToEditorJS } from '../utils/parseTxtToEditorJS'
 import { analyzeDocument, validateClauses } from '../services/analyzeService'
 import { slugify } from '../components/clause-analysis/ClauseRow'
 import { parseDiffHtmlToBlocks } from '../utils/parseDiffHtmlToBlocks'
-import { decodeBase64 } from '../utils/base64'
+import { decodeBase64Async } from '../utils/base64'
 
 import DocumentUploader from '../components/clause-analysis/DocumentUploader'
-import DocumentPreview from '../components/clause-analysis/DocumentPreview'
 import ClauseForm from '../components/clause-analysis/ClauseForm'
 import AnalysisResults from '../components/clause-analysis/AnalysisResults'
 
-export const Route = createFileRoute('/analyze')({ component: AnalyzePage })
+// Lazy-load DocumentPreview to prevent EditorJS SSR error
+const DocumentPreview = lazy(() => import('../components/clause-analysis/DocumentPreview'))
+
+export const Route = createFileRoute('/analyze')({
+  component: () => <AnalyzePage />,
+  // Disable SSR for this route to prevent EditorJS "Element is not defined" error
+  // EditorJS is a browser-only library that can't be server-rendered
+  staticData: { skipSsr: true },
+})
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -171,21 +178,39 @@ function AnalyzePage() {
       setError('Please upload a document or type your contract in the editor.'); return
     }
     setIsAnalyzing(true); setResult(null)
+    const analyzeStartTime = performance.now()
     try {
+      console.log('[Analyze] Starting analysis...')
+      console.log('[Analyze] Calling analyzeDocument with', clauses.length, 'clauses')
       const data = await analyzeDocument(uploadedFile, editorData, clauses, context)
+      const elapsed = performance.now() - analyzeStartTime
+      console.log('[Analyze] API returned after', elapsed.toFixed(2), 'ms, setting result')
+      console.log('[Analyze] Result contains:', { hasReport: !!data.report_md_base64, hasSummary: !!data.summary_md_base64 })
       setResult(data)
       if (data.report_md_base64) {
-        const html = decodeBase64(data.report_md_base64)
+        console.log('[Analyze] Decoding base64...')
+        await new Promise((r) => setTimeout(r, 0))
+        const html = await decodeBase64Async(data.report_md_base64)
+        console.log('[Analyze] Decode complete, setting report HTML')
         setReportHtml(html)
-        const blocks = parseDiffHtmlToBlocks(html)
+        console.log('[Analyze] Parsing diff HTML...')
+        await new Promise((r) => setTimeout(r, 0))
+        const blocks = await parseDiffHtmlToBlocks(html)
+        console.log('[Analyze] Parse complete, blocks:', blocks.length)
         if (blocks.length > 0) {
+          console.log('[Analyze] Setting editor data')
+          await new Promise((r) => setTimeout(r, 0))
           setEditorData({ time: Date.now(), blocks, version: '2.31.4' })
         }
+        console.log('[Analyze] Setting report mode true')
         setIsReportMode(true)
       }
+      console.log('[Analyze] Analysis complete')
     } catch (err: any) {
+      console.error('[Analyze] Error:', err)
       setError(err?.message || 'Analysis failed. Please try again.')
     } finally {
+      console.log('[Analyze] Setting isAnalyzing to false')
       setIsAnalyzing(false)
     }
   }, [clauses, editorData, uploadedFile, context])
@@ -408,15 +433,17 @@ function AnalyzePage() {
 
             {/* Document tab — always mounted to preserve EditorJS instance */}
             <div className={`flex-1 overflow-y-auto p-4 ${(result || isAnalyzing) && rightTab === 'analysis' ? 'hidden' : ''}`}>
-              <DocumentPreview
-                editorData={editorData}
-                onChange={setEditorData}
-                documentTitle={documentTitle}
-                onTitleChange={setDocumentTitle}
-                isReportMode={isReportMode}
-                decisionStats={decisionStats}
-                reportHtml={reportHtml}
-              />
+              <Suspense fallback={<div className="text-sm text-slate-500">Loading document…</div>}>
+                <DocumentPreview
+                  editorData={editorData}
+                  onChange={setEditorData}
+                  documentTitle={documentTitle}
+                  onTitleChange={setDocumentTitle}
+                  isReportMode={isReportMode}
+                  decisionStats={decisionStats}
+                  reportHtml={reportHtml}
+                />
+              </Suspense>
             </div>
 
             {/* Analysis tab */}
