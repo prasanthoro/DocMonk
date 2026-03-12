@@ -184,27 +184,43 @@ function AnalyzePage() {
       console.log('[Analyze] Calling analyzeDocument with', clauses.length, 'clauses')
       const data = await analyzeDocument(uploadedFile, editorData, clauses, context)
       const elapsed = performance.now() - analyzeStartTime
-      console.log('[Analyze] API returned after', elapsed.toFixed(2), 'ms, setting result')
-      console.log('[Analyze] Result contains:', { hasReport: !!data.report_md_base64, hasSummary: !!data.summary_md_base64 })
+      console.log('[Analyze] API returned after', elapsed.toFixed(2), 'ms')
       setResult(data)
+
       if (data.report_md_base64) {
-        console.log('[Analyze] Decoding base64...')
+        console.log('[Analyze] Processing report, base64 size:', data.report_md_base64.length)
+
+        // Yield before decoding
         await new Promise((r) => setTimeout(r, 0))
+        console.log('[Analyze] Starting base64 decode...')
+
+        const decodeStart = performance.now()
         const html = await decodeBase64Async(data.report_md_base64)
-        console.log('[Analyze] Decode complete, setting report HTML')
+        const decodeElapsed = performance.now() - decodeStart
+        console.log('[Analyze] Decode complete after', decodeElapsed.toFixed(2), 'ms, HTML size:', html.length)
+
         setReportHtml(html)
-        console.log('[Analyze] Parsing diff HTML...')
+
+        // Yield before parsing HTML
         await new Promise((r) => setTimeout(r, 0))
+        console.log('[Analyze] Starting HTML parsing...')
+
+        const parseStart = performance.now()
         const blocks = await parseDiffHtmlToBlocks(html)
-        console.log('[Analyze] Parse complete, blocks:', blocks.length)
+        const parseElapsed = performance.now() - parseStart
+        console.log('[Analyze] Parse complete after', parseElapsed.toFixed(2), 'ms, blocks:', blocks.length)
+
         if (blocks.length > 0) {
-          console.log('[Analyze] Setting editor data')
+          // Yield before setting editor data
           await new Promise((r) => setTimeout(r, 0))
+          console.log('[Analyze] Setting editor data with', blocks.length, 'blocks')
           setEditorData({ time: Date.now(), blocks, version: '2.31.4' })
         }
-        console.log('[Analyze] Setting report mode true')
+
+        console.log('[Analyze] Setting report mode')
         setIsReportMode(true)
       }
+
       console.log('[Analyze] Analysis complete')
     } catch (err: any) {
       console.error('[Analyze] Error:', err)

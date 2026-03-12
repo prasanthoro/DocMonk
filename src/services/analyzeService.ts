@@ -154,14 +154,21 @@ export async function analyzeDocument(
 
       console.log('[analyzeService] Response text read after', readElapsed.toFixed(2), 'ms, size:', responseText.length, 'bytes')
 
-      // Now parse JSON
+      // Yield to browser before heavy JSON parsing
+      await new Promise(r => setTimeout(r, 0))
+      console.log('[analyzeservice] Yielded to browser before JSON parsing')
+
+      // Now parse JSON with timing
       const parseStart = performance.now()
       const data = JSON.parse(responseText)
       const parseElapsed = performance.now() - parseStart
 
-      console.log('[analyzeservice] JSON parsed after', parseElapsed.toFixed(2), 'ms, response contains:', {
+      console.log('[analyzeservice] JSON parsed after', parseElapsed.toFixed(2), 'ms')
+      console.log('[analyzeservice] Response structure:', {
         hasReport: !!data.report_md_base64,
         hasSummary: !!data.summary_md_base64,
+        reportSize: data.report_md_base64?.length || 0,
+        summarySize: data.summary_md_base64?.length || 0,
         summaryCount: data.analysis_summary?.length || 0,
       })
       return data as AnalysisResponse
