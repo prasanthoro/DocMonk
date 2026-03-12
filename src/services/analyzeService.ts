@@ -96,18 +96,6 @@ export async function analyzeDocument(
     console.log('[analyzeService] URL:', url)
     console.log('[analyzeService] Request body size:', requestBody.length)
 
-    // Quick CORS preflight test
-    console.log('[analyzeService] Testing CORS preflight...')
-    try {
-      const corsTest = await Promise.race([
-        fetch(url, { method: 'OPTIONS' }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('CORS test timeout')), 2000))
-      ])
-      console.log('[analyzeService] CORS preflight OK, status:', corsTest.status)
-    } catch (corsErr) {
-      console.warn('[analyzeService] CORS preflight warning:', (corsErr as any)?.message)
-    }
-
     const startTime = performance.now()
 
     // Create AbortController for better timeout handling
@@ -119,7 +107,9 @@ export async function analyzeDocument(
 
     try {
       console.log('[analyzeService] Initiating fetch...')
-      const res = await fetch(url, {
+
+      // Wrap fetch with a separate 5-second timeout for just getting the response headers
+      const fetchPromise = fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -128,6 +118,12 @@ export async function analyzeDocument(
         body: requestBody,
         signal: controller.signal,
       })
+
+      const fetchTimeout = new Promise<Response>((_, reject) =>
+        setTimeout(() => reject(new Error('Fetch request timed out after 5 seconds')), 5000)
+      )
+
+      const res = await Promise.race([fetchPromise, fetchTimeout])
 
       clearTimeout(abortTimer)
       const elapsed = performance.now() - startTime
