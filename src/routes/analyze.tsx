@@ -178,55 +178,30 @@ function AnalyzePage() {
       setError('Please upload a document or type your contract in the editor.'); return
     }
     setIsAnalyzing(true); setResult(null)
-    const analyzeStartTime = performance.now()
     try {
-      console.log('[Analyze] Starting analysis...')
-      console.log('[Analyze] Calling analyzeDocument with', clauses.length, 'clauses')
       const data = await analyzeDocument(uploadedFile, editorData, clauses, context)
-      const elapsed = performance.now() - analyzeStartTime
-      console.log('[Analyze] API returned after', elapsed.toFixed(2), 'ms')
       setResult(data)
 
       if (data.report_md_base64) {
-        console.log('[Analyze] Processing report, base64 size:', data.report_md_base64.length)
-
-        // Yield before decoding
+        // Yield before heavy decoding to keep UI responsive
         await new Promise((r) => setTimeout(r, 0))
-        console.log('[Analyze] Starting base64 decode...')
-
-        const decodeStart = performance.now()
         const html = await decodeBase64Async(data.report_md_base64)
-        const decodeElapsed = performance.now() - decodeStart
-        console.log('[Analyze] Decode complete after', decodeElapsed.toFixed(2), 'ms, HTML size:', html.length)
-
         setReportHtml(html)
 
-        // Yield before parsing HTML
+        // Yield before heavy HTML parsing
         await new Promise((r) => setTimeout(r, 0))
-        console.log('[Analyze] Starting HTML parsing...')
-
-        const parseStart = performance.now()
         const blocks = await parseDiffHtmlToBlocks(html)
-        const parseElapsed = performance.now() - parseStart
-        console.log('[Analyze] Parse complete after', parseElapsed.toFixed(2), 'ms, blocks:', blocks.length)
 
         if (blocks.length > 0) {
-          // Yield before setting editor data
           await new Promise((r) => setTimeout(r, 0))
-          console.log('[Analyze] Setting editor data with', blocks.length, 'blocks')
           setEditorData({ time: Date.now(), blocks, version: '2.31.4' })
         }
 
-        console.log('[Analyze] Setting report mode')
         setIsReportMode(true)
       }
-
-      console.log('[Analyze] Analysis complete')
     } catch (err: any) {
-      console.error('[Analyze] Error:', err)
       setError(err?.message || 'Analysis failed. Please try again.')
     } finally {
-      console.log('[Analyze] Setting isAnalyzing to false')
       setIsAnalyzing(false)
     }
   }, [clauses, editorData, uploadedFile, context])
