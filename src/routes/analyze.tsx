@@ -218,20 +218,6 @@ function AnalyzePage() {
     }
   }, [clauses, editorData, uploadedFile, context])
 
-  // const handleExport = useCallback(() => {
-  //   if (!canExport) return
-  //   const resolved = resolveDocumentFromDiff(editorData)
-  //   setEditorData(resolved); setIsReportMode(false)
-  //   const txt = editorDataToPlainText(resolved)
-  //   if (!txt) return
-  //   const name = makeSafeFilename(documentTitle || uploadedFile?.name || 'updated-document')
-  //   const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' })
-  //   const url = URL.createObjectURL(blob)
-  //   const a = document.createElement('a')
-  //   a.href = url; a.download = `${name}-updated.txt`
-  //   document.body.appendChild(a); a.click()
-  //   document.body.removeChild(a); URL.revokeObjectURL(url)
-  // }, [canExport, editorData, documentTitle, uploadedFile])
 
   const handleExport = useCallback(async (format: 'txt' | 'docx' | 'pdf') => {
     if (!canExport) return
@@ -332,40 +318,6 @@ function AnalyzePage() {
                 New Analysis
               </button>
             )}
-            {/* {canExport && (
-              <button onClick={handleExport} className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-sm shadow-emerald-200 hover:bg-emerald-700 transition active:scale-95">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-                </svg>
-                Export Document
-              </button>
-            )} */}
-
-            {/* {canExport && (
-              <div className="flex items-center gap-1.5 bg-emerald-50 p-1 rounded-xl border border-emerald-100">
-                <button
-                  onClick={() => handleExport('txt')}
-                  className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 rounded-lg transition"
-                >
-                  TXT
-                </button>
-                <div className="w-px h-3 bg-emerald-200" />
-                <button
-                  onClick={() => handleExport('docx')}
-                  className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 rounded-lg transition"
-                >
-                  DOCX
-                </button>
-                <div className="w-px h-3 bg-emerald-200" />
-                <button
-                  onClick={() => handleExport('pdf')}
-                  className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 rounded-lg transition"
-                >
-                  PDF
-                </button>
-              </div>
-            )} */}
-
 
             {canExport && (
               <div className="flex items-center gap-1.5 bg-emerald-50 p-1 rounded-xl border border-emerald-100">
