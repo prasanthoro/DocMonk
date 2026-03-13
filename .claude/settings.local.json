@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit -m \"Fix: Remove duplicate /v1 from VITE_API_URL:*)"
+    ]
+  }
+}

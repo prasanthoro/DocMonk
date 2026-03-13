@@ -12,21 +12,35 @@ export function encodeBase64(str: string): string {
 
 /**
  * Decode a base64 string back to UTF-8 text.
- * Handles HTML content encoded with encodeBase64.
+ * Uses native operations for efficient decoding.
  */
 export function decodeBase64(b64: string): string {
   try {
-    return decodeURIComponent(
-      Array.prototype.map
-        .call(atob(b64), (c: string) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
-    )
+    const binaryStr = atob(b64)
+    // Use native Uint8Array.from instead of JS loop for better performance
+    const bytes = Uint8Array.from(binaryStr, (c) => c.charCodeAt(0))
+    return new TextDecoder().decode(bytes)
   } catch {
     try {
       return atob(b64)
     } catch {
       return ''
     }
+  }
+}
+
+/**
+ * Decode base64 asynchronously without blocking the main thread.
+ * Uses fetch() with a data URL — the browser decodes base64 natively in C++,
+ * completely off the main thread. No manual chunking or yielding needed.
+ * Falls back to sync decodeBase64() if fetch fails (e.g. SSR).
+ */
+export async function decodeBase64Async(b64: string): Promise<string> {
+  try {
+    const res = await fetch(`data:text/plain;charset=utf-8;base64,${b64}`)
+    return await res.text()
+  } catch {
+    return decodeBase64(b64)
   }
 }
 

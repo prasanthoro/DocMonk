@@ -585,9 +585,6 @@ function SessionWorkspace({
           }
         },
       })
-      setTimeout(() => {
-        loadSession()
-      }, 300)
     } catch (e: any) {
       const msg = e?.message || 'Streaming request failed.'
       setMessages((prev) =>
@@ -760,6 +757,15 @@ function QAPage() {
     [activeSessionId],
   )
 
+  const handleSessionMetaUpdate = useCallback(
+    (next: Partial<QASessionRecord> & { session_id: string }) => {
+      setSessions((prev) =>
+        prev.map((s) => (s.session_id === next.session_id ? { ...s, ...next } : s)),
+      )
+    },
+    [],
+  )
+
   const handleSessionCreated = useCallback(
     async (session: QASessionRecord, previews: LocalPreviewDoc[], requestedName: string) => {
       if (requestedName) {
@@ -827,11 +833,7 @@ function QAPage() {
             key={activeSessionId}
             sessionId={activeSessionId}
             localPreviewDocs={localPreviewMap[activeSessionId] || []}
-            onSessionMetaUpdate={(next) => {
-              setSessions((prev) =>
-                prev.map((s) => (s.session_id === next.session_id ? { ...s, ...next } : s)),
-              )
-            }}
+            onSessionMetaUpdate={handleSessionMetaUpdate}
           />
         )}
       </div>

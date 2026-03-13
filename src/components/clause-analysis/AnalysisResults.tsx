@@ -1,8 +1,8 @@
-import { useRef, useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type { AnalysisResponse } from '../../types/clauseAnalysis'
 import { AnalysisSkeletonLayout } from './SkeletonLoader'
 import { decodeBase64 } from '../../utils/base64'
-
+import ClauseResultCard from './ClauseResultCard'
 interface Props {
   result: AnalysisResponse | null
   isLoading: boolean
@@ -108,10 +108,24 @@ export default function AnalysisResults({ result, isLoading, clauseCount = 4 }: 
         )}
       </div>
 
-      {/* ── Summary ── */}
+      {/* ── Clause Results ── */}
+      {summary.length > 0 && (
+        <div className="px-6 py-6 border-b border-slate-100 bg-slate-50/50">
+          <h3 className="text-sm font-bold text-slate-800 mb-4">Detailed Clause Analysis</h3>
+          <div className="space-y-3">
+            {summary.map((item, i) => (
+              <ClauseResultCard key={item.clause_id || i} item={item} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Summary / Fallback ── */}
       {result.summary_md_base64
         ? <SummaryPanel base64={result.summary_md_base64} />
-        : <EmptyState message="No summary available for this analysis." />
+        : summary.length === 0
+          ? <EmptyState message="No analysis data available." />
+          : null
       }
 
     </div>
@@ -120,37 +134,40 @@ export default function AnalysisResults({ result, isLoading, clauseCount = 4 }: 
 
 // ─── Summary panel ────────────────────────────────────────────────────────────
 
-function SummaryPanel({ base64 }: { base64: string }) {
+function SummaryPanel({ base64, html: rawHtml }: { base64?: string; html?: string }) {
+  const [html, setHtml] = useState<string | null>(rawHtml ?? null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
-  const [height, setHeight] = useState(500)
-  const [loaded, setLoaded] = useState(false)
-  // Decode after first paint so it doesn't block the tab switch render
-  const [raw, setRaw] = useState<string | null>(null)
+  const [iframeHeight, setIframeHeight] = useState(500)
+  const [iframeLoaded, setIframeLoaded] = useState(false)
 
   useEffect(() => {
-    const id = requestAnimationFrame(() => {
-      setRaw(decodeBase64(base64))
-    })
-    return () => cancelAnimationFrame(id)
-  }, [base64])
+    if (rawHtml) { setHtml(rawHtml); setIframeLoaded(false); return }
+    if (!base64) return
+    let cancelled = false
+    setHtml(null)
+    setIframeLoaded(false)
+    const timer = setTimeout(() => {
+      if (!cancelled) {
+        const decoded = decodeBase64(base64)
+        setHtml(decoded || '')
+      }
+    }, 0)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [base64, rawHtml])
 
   const handleLoad = () => {
-    try {
-      const body = iframeRef.current?.contentDocument?.body
-      if (body) {
-        setTimeout(() => {
-          if (body.scrollHeight > 0) setHeight(body.scrollHeight + 40)
-          setLoaded(true)
-        }, 80)
-      } else {
-        setLoaded(true)
-      }
-    } catch {
-      setLoaded(true)
+    const body = iframeRef.current?.contentDocument?.body
+    if (body) {
+      requestAnimationFrame(() => {
+        if (body.scrollHeight > 0) setIframeHeight(body.scrollHeight + 40)
+        setIframeLoaded(true)
+      })
+    } else {
+      setIframeLoaded(true)
     }
   }
 
-  if (raw === null) {
+  if (html === null) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 bg-white" style={{ minHeight: 300 }}>
         <div className="h-5 w-5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
@@ -159,7 +176,7 @@ function SummaryPanel({ base64 }: { base64: string }) {
     )
   }
 
-  if (!raw) {
+  if (!html) {
     return (
       <div className="px-6 py-10 text-center text-sm text-slate-400">
         Summary report could not be decoded.
@@ -169,7 +186,7 @@ function SummaryPanel({ base64 }: { base64: string }) {
 
   return (
     <div className="relative w-full">
-      {!loaded && (
+      {!iframeLoaded && (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white" style={{ minHeight: 300 }}>
           <div className="h-5 w-5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
           <span className="text-xs text-slate-400">Loading summary…</span>
@@ -177,10 +194,10 @@ function SummaryPanel({ base64 }: { base64: string }) {
       )}
       <iframe
         ref={iframeRef}
-        srcDoc={raw}
+        srcDoc={html}
         onLoad={handleLoad}
         className="w-full border-0 block"
-        style={{ height: `${height}px`, opacity: loaded ? 1 : 0, transition: 'opacity 0.2s ease' }}
+        style={{ height: `${iframeHeight}px`, opacity: iframeLoaded ? 1 : 0, transition: 'opacity 0.2s ease' }}
         title="Analysis Summary"
       />
     </div>

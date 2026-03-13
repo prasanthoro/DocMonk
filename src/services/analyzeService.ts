@@ -4,6 +4,46 @@ import type { Clause, AnalysisResponse } from '../types/clauseAnalysis'
 
 const BASE_URL = (import.meta as any).env?.VITE_API_URL || 'https://docmonk-production.up.railway.app'
 
+// ─── Resume-loop helper ───────────────────────────────────────────────────────
+
+/**
+ * If the initial analyze response has can_resume=true, the backend still has
+ * more data to send (analysis_summary, summary_md_base64, etc.).
+ * Keep calling POST /v1/jobs/{jobId}/resume until can_resume is false or we
+ * run out of retries. Merges each response into the accumulated data object.
+ */
+async function resumeUntilComplete(
+  data: Record<string, any>,
+  signal: AbortSignal,
+  maxRetries = 10,
+): Promise<Record<string, any>> {
+  let merged = { ...data }
+  let retries = 0
+
+  while (merged.can_resume && merged.job_id && retries < maxRetries) {
+    retries++
+    await new Promise((r) => setTimeout(r, 800)) // brief back-off between retries
+
+    const res = await fetch(`${BASE_URL}/v1/jobs/${merged.job_id}/resume`, {
+      method: 'POST',
+      signal,
+    })
+    if (!res.ok) break
+
+    const chunk = await res.json()
+    console.log(`[DocMonk] resume #${retries} keys:`, Object.keys(chunk).join(', '))
+
+    // Merge: newer chunk fields overwrite, but don't clear existing values with null/undefined
+    for (const key of Object.keys(chunk)) {
+      if (chunk[key] !== null && chunk[key] !== undefined) {
+        merged[key] = chunk[key]
+      }
+    }
+  }
+
+  return merged
+}
+
 // 2-minute timeout — AI analysis can take 10-60s depending on document size
 const ANALYZE_TIMEOUT_MS = 120_000
 
@@ -95,7 +135,36 @@ export async function analyzeDocument(
       throw new Error(text || `Analysis failed with status ${res.status}`)
     }
 
-    const data = await res.json()
+    let data = await res.json()
+
+    // Debug: log all API keys and short-circuit base64 blobs so nothing is hidden
+    console.log('[DocMonk] API keys:', Object.keys(data).join(', '))
+
+    // If the backend signals more data is available, fetch it now
+    if (data.can_resume && data.job_id) {
+      data = await resumeUntilComplete(data, controller.signal)
+      console.log('[DocMonk] after resume, keys:', Object.keys(data).join(', '))
+    }
+    const preview: Record<string, unknown> = {}
+    for (const k of Object.keys(data)) {
+      const v = (data as any)[k]
+      preview[k] = typeof v === 'string' && v.length > 80 ? `[base64 ${v.length}ch]` : v
+    }
+    console.log('[DocMonk] API values:', preview)
+
+    // Normalize analysis_summary from alternative field names the API might use
+    if (!data.analysis_summary?.length) {
+      const alt = data.results ?? data.clause_results ?? data.analysis ?? data.clauses ?? data.clause_analysis
+      if (Array.isArray(alt) && alt.length > 0) {
+        data.analysis_summary = alt
+      }
+    }
+
+    // Normalize summary_md_base64 from alternative field names
+    if (!data.summary_md_base64) {
+      data.summary_md_base64 = data.summary_base64 ?? data.summary_md ?? data.md_summary ?? null
+    }
+
     return data as AnalysisResponse
   } catch (err: any) {
     clearTimeout(abortTimer)

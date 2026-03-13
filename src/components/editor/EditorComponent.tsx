@@ -34,9 +34,11 @@ export default function EditorComponent({
   const editorRef = useRef<EditorJS | null>(null);
   const mountedRef = useRef(false);
   const initializingRef = useRef(false);
-  // Tracks last data seen — prevents blinking when parent echoes onChange back
-  const lastDataRef = useRef<string>("");
+  const lastDataTimeRef = useRef<number>(0);
   const onChangeRef = useRef(onChange);
+  // Suppresses onChange during programmatic render / alignment application
+  const suppressOnChangeRef = useRef(false);
+  const onChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
@@ -45,44 +47,70 @@ export default function EditorComponent({
 
   const applyAlignmentFromTunes = useCallback(async (editor: EditorJS) => {
     if (!mountedRef.current || !editor) return;
+    // Suppress onChange while we mutate DOM — otherwise the MutationObserver
+    // fires onChange → applyAlignment → onChange → infinite loop
+    suppressOnChangeRef.current = true;
     try {
       const savedData = await editor.save();
       const blockEls = containerRef.current?.querySelectorAll(".ce-block") ?? [];
+      const blocksArr = savedData.blocks;
+      const ALIGN_CHUNK = 40;
 
-      savedData.blocks.forEach((block, i) => {
-        const alignment = block?.tunes?.alignment?.alignment || "left";
-        const blockEl = blockEls[i] as HTMLElement | undefined;
-        if (!blockEl) return;
+      for (let start = 0; start < blocksArr.length; start += ALIGN_CHUNK) {
+        if (!mountedRef.current) return;
+        const end = Math.min(start + ALIGN_CHUNK, blocksArr.length);
 
-        const selectors = [
-          ".ce-block__content",
-          ".ce-header",
-          ".cdx-paragraph",
-          ".ce-list",
-          ".ce-quote",
-          ".professional-horizontal-line",
-        ];
+        for (let i = start; i < end; i++) {
+          const block = blocksArr[i];
+          const alignment = block?.tunes?.alignment?.alignment || "left";
+          const blockEl = blockEls[i] as HTMLElement | undefined;
+          if (!blockEl) continue;
 
-        let content: HTMLElement | null = null;
-        for (const sel of selectors) {
-          content = blockEl.querySelector(sel);
-          if (content) break;
+          const selectors = [
+            ".ce-block__content",
+            ".ce-header",
+            ".cdx-paragraph",
+            ".ce-list",
+            ".ce-quote",
+            ".professional-horizontal-line",
+          ];
+
+          let content: HTMLElement | null = null;
+          for (const sel of selectors) {
+            content = blockEl.querySelector(sel);
+            if (content) break;
+          }
+          if (content) content.style.textAlign = alignment;
+
+          blockEl.querySelectorAll("p,h1,h2,h3,h4,h5,h6,div").forEach((el) => {
+            const e = el as HTMLElement;
+            if (!e.style.textAlign) e.style.textAlign = alignment;
+          });
         }
-        if (content) content.style.textAlign = alignment;
 
-        blockEl.querySelectorAll("p,h1,h2,h3,h4,h5,h6,div").forEach((el) => {
-          const e = el as HTMLElement;
-          if (!e.style.textAlign) e.style.textAlign = alignment;
-        });
-      });
+        // Yield to browser between chunks so it can paint
+        if (end < blocksArr.length) {
+          await new Promise((r) => requestAnimationFrame(r));
+        }
+      }
     } catch {
       // ignore
+    } finally {
+      // Re-enable onChange after a tick so queued MutationObserver events drain
+      setTimeout(() => {
+        suppressOnChangeRef.current = false;
+      }, 50);
     }
   }, []);
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
   const cleanupEditor = useCallback(async () => {
+    if (onChangeTimerRef.current) {
+      clearTimeout(onChangeTimerRef.current);
+      onChangeTimerRef.current = null;
+    }
+    suppressOnChangeRef.current = false;
     if (editorRef.current) {
       try {
         if (typeof editorRef.current.destroy === "function") {
@@ -116,6 +144,9 @@ export default function EditorComponent({
           ? initialData
           : { time: Date.now(), blocks: [], version: "2.30.8" };
 
+      // Suppress onChange during initial render
+      suppressOnChangeRef.current = true;
+
       const editor = new EditorJS({
         holder: editorId,
         tools: getEditorTools() as any,
@@ -126,8 +157,10 @@ export default function EditorComponent({
         onReady: () => {
           if (!mountedRef.current) return;
           setIsReady(true);
-          lastDataRef.current = JSON.stringify(startData);
+          lastDataTimeRef.current = startData.time;
 
+          // Apply alignment then re-enable onChange
+          // applyAlignmentFromTunes handles suppress internally
           setTimeout(() => {
             if (mountedRef.current) applyAlignmentFromTunes(editor);
           }, 100);
@@ -140,19 +173,20 @@ export default function EditorComponent({
             editorEl.setAttribute("spellcheck", "false");
           }
         },
-        onChange: async () => {
-          if (!mountedRef.current) return;
-          try {
-            const saved = await editor.save();
-            if (!saved) return;
-            // Stamp BEFORE parent callback — prevents the data-sync effect
-            // from re-rendering when the parent echoes the new value back
-            lastDataRef.current = JSON.stringify(saved);
-            onChangeRef.current?.(saved as EditorData);
-            setTimeout(() => {
-              if (mountedRef.current) applyAlignmentFromTunes(editor);
-            }, 150);
-          } catch { /* ignore */ }
+        onChange: () => {
+          if (!mountedRef.current || suppressOnChangeRef.current) return;
+          // Debounce rapid-fire onChange calls
+          if (onChangeTimerRef.current) clearTimeout(onChangeTimerRef.current);
+          onChangeTimerRef.current = setTimeout(async () => {
+            onChangeTimerRef.current = null;
+            if (!mountedRef.current || suppressOnChangeRef.current) return;
+            try {
+              const saved = await editor.save();
+              if (!saved) return;
+              lastDataTimeRef.current = saved.time ?? Date.now();
+              onChangeRef.current?.(saved as EditorData);
+            } catch { /* ignore */ }
+          }, 300);
         },
       });
 
@@ -177,36 +211,91 @@ export default function EditorComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editorId]);
 
-  // ── Sync externally-driven data (e.g. DOCX parse result) ──────────────────
+  // ── Sync externally-driven data (e.g. DOCX parse result, diff report) ─────
+
+  const renderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingDataRef = useRef<EditorData | null>(null);
+  const visibilityPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Check if the editor container is actually visible (not in a hidden tab)
+  const isContainerVisible = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return false;
+    // offsetParent is null when element or ancestor has display:none
+    return el.offsetParent !== null;
+  }, []);
+
+  const doRender = useCallback(async (capturedData: EditorData) => {
+    if (!mountedRef.current || !editorRef.current) return;
+    try {
+      suppressOnChangeRef.current = true;
+      await new Promise((r) => requestAnimationFrame(r));
+      if (!mountedRef.current || !editorRef.current) return;
+      await editorRef.current.clear();
+      // Double-rAF guarantees a paint frame between clear() and render()
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      if (!mountedRef.current || !editorRef.current) return;
+      await editorRef.current.render(capturedData as any);
+      lastDataTimeRef.current = capturedData.time;
+      // Yield before alignment to let render paint first
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      if (mountedRef.current && editorRef.current) {
+        applyAlignmentFromTunes(editorRef.current);
+      }
+    } catch {
+      suppressOnChangeRef.current = false;
+    }
+  }, [applyAlignmentFromTunes]);
 
   useEffect(() => {
     if (!isReady || !editorRef.current) return;
 
-    // Clear the editor when data is reset to null/empty
     if (!data || !data.blocks?.length) {
-      if (lastDataRef.current !== '') {
-        lastDataRef.current = '';
-        editorRef.current?.clear().catch(() => {});
+      if (renderTimerRef.current) { clearTimeout(renderTimerRef.current); renderTimerRef.current = null; }
+      if (visibilityPollRef.current) { clearInterval(visibilityPollRef.current); visibilityPollRef.current = null; }
+      pendingDataRef.current = null;
+      if (lastDataTimeRef.current !== 0) {
+        lastDataTimeRef.current = 0;
+        try { editorRef.current?.clear(); } catch { /* ignore */ }
       }
       return;
     }
 
-    const incoming = JSON.stringify(data);
-    if (incoming === lastDataRef.current) return;
+    if (data.time === lastDataTimeRef.current) return;
 
-    const render = async () => {
-      try {
-        await editorRef.current?.clear();
-        await editorRef.current?.render(data as any);
-        lastDataRef.current = incoming;
-        setTimeout(() => {
-          if (mountedRef.current && editorRef.current) {
-            applyAlignmentFromTunes(editorRef.current);
-          }
-        }, 200);
-      } catch { /* don't re-init — avoids blink on error */ }
+    if (renderTimerRef.current) clearTimeout(renderTimerRef.current);
+    if (visibilityPollRef.current) { clearInterval(visibilityPollRef.current); visibilityPollRef.current = null; }
+
+    const capturedData = data;
+
+    // If the editor is hidden (e.g. user is on a different tab), defer rendering
+    // until it becomes visible. This prevents the massive EditorJS render() freeze
+    // from blocking the UI while the user is looking at the Analysis tab.
+    if (!isContainerVisible()) {
+      pendingDataRef.current = capturedData;
+      visibilityPollRef.current = setInterval(() => {
+        if (!mountedRef.current) {
+          if (visibilityPollRef.current) { clearInterval(visibilityPollRef.current); visibilityPollRef.current = null; }
+          return;
+        }
+        if (isContainerVisible() && pendingDataRef.current) {
+          const pending = pendingDataRef.current;
+          pendingDataRef.current = null;
+          if (visibilityPollRef.current) { clearInterval(visibilityPollRef.current); visibilityPollRef.current = null; }
+          renderTimerRef.current = setTimeout(() => doRender(pending), 80);
+        }
+      }, 200);
+      return () => {
+        if (visibilityPollRef.current) { clearInterval(visibilityPollRef.current); visibilityPollRef.current = null; }
+      };
+    }
+
+    pendingDataRef.current = null;
+    renderTimerRef.current = setTimeout(() => doRender(capturedData), 80);
+
+    return () => {
+      if (renderTimerRef.current) { clearTimeout(renderTimerRef.current); renderTimerRef.current = null; }
     };
-    render();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, isReady]);
 
@@ -228,7 +317,7 @@ export default function EditorComponent({
       try {
         const saved = await editorRef.current.save();
         if (!saved) return;
-        lastDataRef.current = JSON.stringify(saved);
+        lastDataTimeRef.current = saved.time ?? Date.now();
         onChangeRef.current?.(saved as EditorData);
       } catch { /* ignore */ }
     };

@@ -1,6 +1,8 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState, useCallback, useMemo, useRef, useEffect, lazy, Suspense } from 'react'
 import { v4 as uuidv4 } from 'uuid'
+import { exportToTxt, exportToDocx, exportToPdf } from '../utils/exportUtils'
+
 
 import type { Clause, AnalysisResponse } from '../types/clauseAnalysis'
 import { parseDocxToEditorJS } from '../components/editor/DocxParser'
@@ -8,7 +10,7 @@ import { parsePdfToEditorJS } from '../utils/parsePdfToEditorJS'
 import { parseTxtToEditorJS } from '../utils/parseTxtToEditorJS'
 import { analyzeDocument, validateClauses } from '../services/analyzeService'
 import { slugify } from '../components/clause-analysis/ClauseRow'
-import { parseDiffHtmlToBlocks } from '../utils/parseDiffHtmlToBlocks'
+import { parseDiffHtmlToBlocks, parseDiffHtmlToAnalysisSummary } from '../utils/parseDiffHtmlToBlocks'
 import { decodeBase64Async } from '../utils/base64'
 
 import DocumentUploader from '../components/clause-analysis/DocumentUploader'
@@ -98,6 +100,11 @@ function AnalyzePage() {
   const [reportHtml, setReportHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [rightTab, setRightTab] = useState<'editor' | 'analysis'>('editor')
+  const [isDiffParsing, setIsDiffParsing] = useState(false)
+  const [hasPendingDiff, setHasPendingDiff] = useState(false)
+  // Stores the decoded report HTML waiting to be parsed into diff blocks
+  // — parsed lazily only when user clicks the Document tab
+  const pendingDiffHtmlRef = useRef<string | null>(null)
 
   // Auto-switch to analysis tab when analysis starts or completes
   useEffect(() => {
@@ -180,51 +187,106 @@ function AnalyzePage() {
     setIsAnalyzing(true); setResult(null)
     try {
       const data = await analyzeDocument(uploadedFile, editorData, clauses, context)
-      setResult(data)
+
+      let decodedHtml: string | null = null
+      let enrichedData: AnalysisResponse = data
 
       if (data.report_md_base64) {
-        // Yield before heavy decoding to keep UI responsive
-        await new Promise((r) => setTimeout(r, 0))
-        const html = await decodeBase64Async(data.report_md_base64)
-        setReportHtml(html)
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+        decodedHtml = await decodeBase64Async(data.report_md_base64)
 
-        // Yield before heavy HTML parsing
-        await new Promise((r) => setTimeout(r, 0))
-        const blocks = await parseDiffHtmlToBlocks(html)
-
-        if (blocks.length > 0) {
-          await new Promise((r) => setTimeout(r, 0))
-          setEditorData({ time: Date.now(), blocks, version: '2.31.4' })
+        if (decodedHtml && !data.analysis_summary?.length) {
+          const parsedSummary = parseDiffHtmlToAnalysisSummary(decodedHtml)
+          if (parsedSummary.length > 0) {
+            enrichedData = { ...data, analysis_summary: parsedSummary }
+          }
         }
+      }
 
-        setIsReportMode(true)
+      setResult(enrichedData)
+      setIsAnalyzing(false)
+
+      if (decodedHtml) {
+        setReportHtml(decodedHtml)
+        // Store for lazy parsing — diff blocks only needed when user clicks Document tab
+        pendingDiffHtmlRef.current = decodedHtml
+        setHasPendingDiff(true)
       }
     } catch (err: any) {
       setError(err?.message || 'Analysis failed. Please try again.')
-    } finally {
       setIsAnalyzing(false)
     }
   }, [clauses, editorData, uploadedFile, context])
 
-  const handleExport = useCallback(() => {
+  // const handleExport = useCallback(() => {
+  //   if (!canExport) return
+  //   const resolved = resolveDocumentFromDiff(editorData)
+  //   setEditorData(resolved); setIsReportMode(false)
+  //   const txt = editorDataToPlainText(resolved)
+  //   if (!txt) return
+  //   const name = makeSafeFilename(documentTitle || uploadedFile?.name || 'updated-document')
+  //   const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' })
+  //   const url = URL.createObjectURL(blob)
+  //   const a = document.createElement('a')
+  //   a.href = url; a.download = `${name}-updated.txt`
+  //   document.body.appendChild(a); a.click()
+  //   document.body.removeChild(a); URL.revokeObjectURL(url)
+  // }, [canExport, editorData, documentTitle, uploadedFile])
+
+  const handleExport = useCallback(async (format: 'txt' | 'docx' | 'pdf') => {
     if (!canExport) return
+
+    // 1. Resolve the document based on approved/rejected changes
     const resolved = resolveDocumentFromDiff(editorData)
-    setEditorData(resolved); setIsReportMode(false)
+    setEditorData(resolved)
+    setIsReportMode(false)
+
     const txt = editorDataToPlainText(resolved)
     if (!txt) return
+
+    // 2. Generate a safe filename
     const name = makeSafeFilename(documentTitle || uploadedFile?.name || 'updated-document')
-    const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url; a.download = `${name}-updated.txt`
-    document.body.appendChild(a); a.click()
-    document.body.removeChild(a); URL.revokeObjectURL(url)
+    const finalName = `${name}-updated`
+
+    // 3. Trigger requested export format
+    switch (format) {
+      case 'docx':
+        await exportToDocx(txt, finalName);
+        break;
+      case 'pdf':
+        exportToPdf(txt, finalName);
+        break;
+      default:
+        exportToTxt(txt, finalName);
+    }
   }, [canExport, editorData, documentTitle, uploadedFile])
+
+
+  const handleTabChange = useCallback(async (tab: 'editor' | 'analysis') => {
+    setRightTab(tab)
+    // Lazily parse the diff blocks only when the user first opens the Document tab
+    if (tab === 'editor' && pendingDiffHtmlRef.current && !isReportMode && !isDiffParsing) {
+      const html = pendingDiffHtmlRef.current
+      pendingDiffHtmlRef.current = null
+      setIsDiffParsing(true)
+      setHasPendingDiff(false)
+      try {
+        const blocks = await parseDiffHtmlToBlocks(html)
+        if (blocks.length > 0) {
+          setEditorData({ time: Date.now(), blocks, version: '2.31.4' })
+        }
+        setIsReportMode(true)
+      } finally {
+        setIsDiffParsing(false)
+      }
+    }
+  }, [isReportMode, isDiffParsing])
 
   const handleReset = useCallback(() => {
     setResult(null); setIsReportMode(false)
     setEditorData(null); setUploadedFile(null)
     setReportHtml(null); setError(null); setRightTab('editor')
+    pendingDiffHtmlRef.current = null; setHasPendingDiff(false)
   }, [])
 
   const isReady = !!(uploadedFile || editorData?.blocks?.length)
@@ -265,19 +327,71 @@ function AnalyzePage() {
             {result && !isAnalyzing && (
               <button onClick={handleReset} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/>
+                  <polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
                 </svg>
                 New Analysis
               </button>
             )}
-            {canExport && (
+            {/* {canExport && (
               <button onClick={handleExport} className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-sm shadow-emerald-200 hover:bg-emerald-700 transition active:scale-95">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
                 </svg>
                 Export Document
               </button>
+            )} */}
+
+            {/* {canExport && (
+              <div className="flex items-center gap-1.5 bg-emerald-50 p-1 rounded-xl border border-emerald-100">
+                <button
+                  onClick={() => handleExport('txt')}
+                  className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 rounded-lg transition"
+                >
+                  TXT
+                </button>
+                <div className="w-px h-3 bg-emerald-200" />
+                <button
+                  onClick={() => handleExport('docx')}
+                  className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 rounded-lg transition"
+                >
+                  DOCX
+                </button>
+                <div className="w-px h-3 bg-emerald-200" />
+                <button
+                  onClick={() => handleExport('pdf')}
+                  className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 rounded-lg transition"
+                >
+                  PDF
+                </button>
+              </div>
+            )} */}
+
+
+            {canExport && (
+              <div className="flex items-center gap-1.5 bg-emerald-50 p-1 rounded-xl border border-emerald-100">
+                <button
+                  onClick={() => handleExport('txt')}
+                  className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 rounded-lg transition"
+                >
+                  TXT
+                </button>
+                <div className="w-px h-3 bg-emerald-200" />
+                <button
+                  onClick={() => handleExport('docx')}
+                  className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 rounded-lg transition"
+                >
+                  DOCX
+                </button>
+                <div className="w-px h-3 bg-emerald-200" />
+                <button
+                  onClick={() => handleExport('pdf')}
+                  className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 rounded-lg transition"
+                >
+                  PDF
+                </button>
+              </div>
             )}
+
             <button
               onClick={handleAnalyze}
               disabled={isAnalyzing || isParsing || !isReady}
@@ -286,14 +400,14 @@ function AnalyzePage() {
               {isAnalyzing ? (
                 <>
                   <svg className="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 12a9 9 0 11-6.219-8.56"/>
+                    <path d="M21 12a9 9 0 11-6.219-8.56" />
                   </svg>
                   Analyzing…
                 </>
               ) : (
                 <>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                   </svg>
                   Run Analysis
                 </>
@@ -317,12 +431,12 @@ function AnalyzePage() {
               {error && (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-3 flex items-start gap-2">
                   <svg className="text-red-500 flex-shrink-0 mt-0.5" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                    <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
                   </svg>
                   <p className="text-xs text-red-700 flex-1 leading-relaxed">{error}</p>
                   <button onClick={() => setError(null)} className="text-red-400 hover:text-red-600 flex-shrink-0 mt-0.5">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
                     </svg>
                   </button>
                 </div>
@@ -355,12 +469,11 @@ function AnalyzePage() {
             {/* ── Sticky context prompt at bottom ── */}
             <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 py-3">
               <div className="flex items-center gap-2 mb-2.5">
-                <span className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
-                  context.trim() ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-500'
-                }`}>
+                <span className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${context.trim() ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-500'
+                  }`}>
                   {context.trim() ? (
                     <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="20 6 9 17 4 12"/>
+                      <polyline points="20 6 9 17 4 12" />
                     </svg>
                   ) : 3}
                 </span>
@@ -381,36 +494,40 @@ function AnalyzePage() {
             {(result || isAnalyzing) && (
               <div className="flex-shrink-0 bg-white border-b border-slate-200 px-5 flex items-center gap-0">
                 <button
-                  onClick={() => setRightTab('editor')}
-                  className={`flex items-center gap-1.5 py-3 px-1 mr-6 text-sm font-semibold border-b-2 transition -mb-px ${
-                    rightTab === 'editor'
-                      ? 'border-indigo-600 text-indigo-700'
-                      : 'border-transparent text-slate-500 hover:text-slate-700'
-                  }`}
+                  onClick={() => handleTabChange('editor')}
+                  className={`flex items-center gap-1.5 py-3 px-1 mr-6 text-sm font-semibold border-b-2 transition -mb-px ${rightTab === 'editor'
+                    ? 'border-indigo-600 text-indigo-700'
+                    : 'border-transparent text-slate-500 hover:text-slate-700'
+                    }`}
                 >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                    <line x1="16" y1="13" x2="8" y2="13"/>
-                    <line x1="16" y1="17" x2="8" y2="17"/>
-                  </svg>
+                  {isDiffParsing ? (
+                    <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 12a9 9 0 11-6.219-8.56" />
+                    </svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="16" y1="13" x2="8" y2="13" />
+                      <line x1="16" y1="17" x2="8" y2="17" />
+                    </svg>
+                  )}
                   Document
-                  {isReportMode && (
+                  {(isReportMode || hasPendingDiff || isDiffParsing) && (
                     <span className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 ${rightTab === 'editor' ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
-                      Diff
+                      {isDiffParsing ? '…' : 'Diff'}
                     </span>
                   )}
                 </button>
                 <button
-                  onClick={() => setRightTab('analysis')}
-                  className={`flex items-center gap-1.5 py-3 px-1 text-sm font-semibold border-b-2 transition -mb-px ${
-                    rightTab === 'analysis'
-                      ? 'border-indigo-600 text-indigo-700'
-                      : 'border-transparent text-slate-500 hover:text-slate-700'
-                  }`}
+                  onClick={() => handleTabChange('analysis')}
+                  className={`flex items-center gap-1.5 py-3 px-1 text-sm font-semibold border-b-2 transition -mb-px ${rightTab === 'analysis'
+                    ? 'border-indigo-600 text-indigo-700'
+                    : 'border-transparent text-slate-500 hover:text-slate-700'
+                    }`}
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                   </svg>
                   Summary Analysis
                   {result?.analysis_summary?.length ? (
@@ -471,7 +588,7 @@ function SideCard({ step, title, children, done, optional, badge }: {
         <span className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${done ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-500'}`}>
           {done ? (
             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="20 6 9 17 4 12"/>
+              <polyline points="20 6 9 17 4 12" />
             </svg>
           ) : step}
         </span>
@@ -490,15 +607,13 @@ function StepPill({ n, label, done, loading, optional, count }: {
   n: number; label: string; done?: boolean; loading?: boolean; optional?: boolean; count?: number
 }) {
   return (
-    <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold transition ${
-      loading ? 'bg-indigo-50 text-indigo-600' :
+    <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold transition ${loading ? 'bg-indigo-50 text-indigo-600' :
       done ? 'bg-emerald-50 text-emerald-700' :
-      'bg-slate-100 text-slate-400'
-    }`}>
-      <span className={`h-3.5 w-3.5 rounded-full flex items-center justify-center text-[9px] font-black flex-shrink-0 ${
-        loading ? 'bg-indigo-500 text-white' :
-        done ? 'bg-emerald-500 text-white' : 'bg-slate-300 text-white'
+        'bg-slate-100 text-slate-400'
       }`}>
+      <span className={`h-3.5 w-3.5 rounded-full flex items-center justify-center text-[9px] font-black flex-shrink-0 ${loading ? 'bg-indigo-500 text-white' :
+        done ? 'bg-emerald-500 text-white' : 'bg-slate-300 text-white'
+        }`}>
         {loading ? '…' : done ? '✓' : n}
       </span>
       {label}
@@ -513,7 +628,7 @@ function StepPill({ n, label, done, loading, optional, count }: {
 function Arrow() {
   return (
     <svg className="text-slate-300 flex-shrink-0" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="9 18 15 12 9 6"/>
+      <polyline points="9 18 15 12 9 6" />
     </svg>
   )
 }
@@ -553,11 +668,10 @@ function ContextPrompt({ value, onChange, onSubmit, isLoading }: {
       </p>
 
       {/* Chat-style input box */}
-      <div className={`relative rounded-2xl border-2 transition-all duration-150 ${
-        value.trim()
-          ? 'border-indigo-300 shadow-md shadow-indigo-100/60 bg-white'
-          : 'border-slate-200 bg-white hover:border-slate-300'
-      }`}>
+      <div className={`relative rounded-2xl border-2 transition-all duration-150 ${value.trim()
+        ? 'border-indigo-300 shadow-md shadow-indigo-100/60 bg-white'
+        : 'border-slate-200 bg-white hover:border-slate-300'
+        }`}>
         <textarea
           ref={textareaRef}
           value={value}
@@ -587,19 +701,18 @@ function ContextPrompt({ value, onChange, onSubmit, isLoading }: {
             onClick={onSubmit}
             disabled={isLoading}
             title={value.trim() ? 'Run analysis (Enter)' : 'Add context above, then run analysis'}
-            className={`h-7 w-7 rounded-xl flex items-center justify-center transition active:scale-95 shadow-sm ${
-              value.trim() && !isLoading
-                ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200'
-                : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-            }`}
+            className={`h-7 w-7 rounded-xl flex items-center justify-center transition active:scale-95 shadow-sm ${value.trim() && !isLoading
+              ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200'
+              : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+              }`}
           >
             {isLoading ? (
               <svg className="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12a9 9 0 11-6.219-8.56"/>
+                <path d="M21 12a9 9 0 11-6.219-8.56" />
               </svg>
             ) : (
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
               </svg>
             )}
           </button>
