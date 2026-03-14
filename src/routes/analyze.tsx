@@ -223,9 +223,9 @@ function AnalyzePage() {
     if (!canExport) return
 
     // 1. Resolve the document based on approved/rejected changes
+    // Only resolve the blocks, but DO NOT save it to editorData or hide the report
+    // This allows the user to download multiple times!
     const resolved = resolveDocumentFromDiff(editorData)
-    setEditorData(resolved)
-    setIsReportMode(false)
 
     const txt = editorDataToPlainText(resolved)
     if (!txt) return
@@ -273,7 +273,12 @@ function AnalyzePage() {
     setEditorData(null); setUploadedFile(null)
     setReportHtml(null); setError(null); setRightTab('editor')
     pendingDiffHtmlRef.current = null; setHasPendingDiff(false)
+    setClauses([newClause()]); setContext('')
   }, [])
+
+  const handleCompleted = useCallback(() => {
+    handleReset()
+  }, [handleReset])
 
   const isReady = !!(uploadedFile || editorData?.blocks?.length)
   const validClauseCount = clauses.filter((c) => c.title.trim() && c.value.trim()).length
@@ -342,6 +347,15 @@ function AnalyzePage() {
                   PDF
                 </button>
               </div>
+            )}
+
+            {canExport && (
+              <button
+                onClick={handleCompleted}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[10px] font-bold text-white shadow-sm hover:bg-emerald-700 transition"
+              >
+                Completed
+              </button>
             )}
 
             <button
