@@ -58,6 +58,7 @@ export interface AnalysisResponse {
   jurisdiction?: Jurisdiction
   report_md_base64?: string
   summary_md_base64?: string
+  summary_json?: SummaryJson
 }
 
 // ─── UI state ────────────────────────────────────────────────────────────────
@@ -115,4 +116,73 @@ export const STATUS_CONFIG: Record<
     label: 'Partial',
     icon: '~',
   },
+}
+
+// ─── Native JSON Dashboard Types ─────────────────────────────────────────────
+
+export interface SummaryJsonStats {
+  total: number;
+  match: number;
+  violation: number;
+  partial: number;
+  not_found: number;
+}
+
+export interface SummaryJsonAgreement {
+  type: string;
+  date: string;
+  city: string;
+  state: string;
+  party_a: string;
+  party_b: string;
+}
+
+export interface SummaryJsonClause {
+  index: number;
+  clause_id: string;
+  clause_title: string;
+  clause_value: string;
+  category: string;
+  risk_level: 'HIGH' | 'MEDIUM' | 'LOW';
+  result: ClauseResult;
+  reason: string;
+  relevant_text: string | null;
+  ai_added_text: string | null;
+  parties_obligated: string[];
+  missing_values: string[];
+  binding_strength: string;
+  key_dates_durations: string[];
+}
+
+export interface SummaryJsonCategoryBreakdown {
+  name: string;
+  risk_level: 'HIGH' | 'MEDIUM' | 'LOW';
+  total: number;
+  compliant: number;
+  issues: number;
+  pass_rate: number;
+}
+
+export interface SummaryJsonJurisdictionDetails {
+  jurisdiction: string;
+  agreement_type: string;
+  applicable_laws: string[];
+  checklist: { item: string; required: boolean }[];
+}
+
+export interface SummaryJsonTimelineItem {
+  clause_title: string;
+  item: string;
+}
+
+export interface SummaryJson {
+  compliance_score: number;
+  score_status: string;
+  stats: SummaryJsonStats;
+  agreement: SummaryJsonAgreement;
+  critical_issue_ids: string[];
+  clauses: SummaryJsonClause[];
+  category_breakdown: SummaryJsonCategoryBreakdown[];
+  jurisdiction: SummaryJsonJurisdictionDetails;
+  timeline: SummaryJsonTimelineItem[];
 }

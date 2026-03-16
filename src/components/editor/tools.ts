@@ -1,22 +1,42 @@
-import InlineCode from "@editorjs/inline-code";
-import EditorjsList from "@editorjs/list";
-import Paragraph from "@editorjs/paragraph";
-// @ts-ignore
-import Marker from "@editorjs/marker";
-import Underline from "@editorjs/underline";
-import { TextColorTool } from "./TextStyleTools";
-// @ts-ignore
-import ChangeCase from "editorjs-change-case";
-import IndentTune from "editorjs-indent-tune";
-import Delimiter from "@editorjs/delimiter";
-import CustomTableTool from "./CustomTableTool";
-import AlignmentTune from "./CustomAlignmentTool";
-import { CustomHeaderTool } from "./CustomHeaderTool";
-import { HorizontalLineTool } from "./CustomHorizontalLineTool";
-import SimpleImageTool from "./SimpleImageTool";
-import DiffBlockTool from "./DiffBlockTool";
+// All imports are dynamically loaded inside getEditorTools() to prevent SSR crashes
 
-export function getEditorTools() {
+export async function getEditorTools() {
+  const [
+    { default: InlineCode },
+    { default: EditorjsList },
+    { default: Paragraph },
+    { default: Marker },
+    { default: Underline },
+    { TextColorTool },
+    { default: ChangeCase },
+    { default: IndentTune },
+    { default: Delimiter },
+    { default: CustomTableTool },
+    { default: AlignmentTune },
+    { CustomHeaderTool },
+    { HorizontalLineTool },
+    { default: SimpleImageTool },
+    { default: DiffBlockTool },
+  ] = await Promise.all([
+    import("@editorjs/inline-code"),
+    import("@editorjs/list"),
+    import("@editorjs/paragraph"),
+    // @ts-ignore
+    import("@editorjs/marker"),
+    import("@editorjs/underline"),
+    import("./TextStyleTools"),
+    // @ts-ignore
+    import("editorjs-change-case"),
+    import("editorjs-indent-tune"),
+    import("@editorjs/delimiter"),
+    import("./CustomTableTool"),
+    import("./CustomAlignmentTool"),
+    import("./CustomHeaderTool"),
+    import("./CustomHorizontalLineTool"),
+    import("./SimpleImageTool"),
+    import("./DiffBlockTool"),
+  ]);
+
   return {
     header: {
       class: CustomHeaderTool,
@@ -30,7 +50,7 @@ export function getEditorTools() {
       },
     },
     paragraph: {
-      class: Paragraph,
+      class: Paragraph as any,
       inlineToolbar: true,
       tunes: ["alignment", "indentTune"],
       config: {
@@ -38,7 +58,7 @@ export function getEditorTools() {
       },
     },
     list: {
-      class: EditorjsList,
+      class: EditorjsList as any,
       inlineToolbar: true,
       tunes: ["alignment"],
       config: {
@@ -55,7 +75,7 @@ export function getEditorTools() {
       config: {},
     },
     delimiter: {
-      class: Delimiter,
+      class: Delimiter as any,
       tunes: ["alignment", "indentTune"],
     },
     horizontalLine: {
@@ -74,23 +94,23 @@ export function getEditorTools() {
     },
     underline: Underline,
     changeCase: {
-      class: ChangeCase,
+      class: ChangeCase as any,
       config: {
         showLocaleOption: true,
         locale: "en",
       },
     },
     indentTune: {
-      class: IndentTune,
+      class: IndentTune as any,
     },
     marker: {
-      class: Marker,
+      class: Marker as any,
     },
     inlineCode: {
-      class: InlineCode,
+      class: InlineCode as any,
     },
     alignment: {
-      class: AlignmentTune,
+      class: AlignmentTune as any,
     },
     diffBlock: {
       class: DiffBlockTool,

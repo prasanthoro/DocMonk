@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import EditorJS from '@editorjs/editorjs'
-import Paragraph from '@editorjs/paragraph'
-import DiffBlockTool from '../editor/DiffBlockTool'
+import type EditorJS from '@editorjs/editorjs'
 import { parseDiffHtmlToBlocks } from '../../utils/parseDiffHtmlToBlocks'
 import { markdownToHtml } from '../../utils/markdownToHtml'
 import { decodeBase64 } from '../../utils/base64'
@@ -132,46 +130,62 @@ export default function DiffReportEditor({ reportBase64, summaryBase64 }: Props)
 
     if (!reportBase64) return
 
-    const html = decodeBase64(reportBase64)
-    if (!html) return
+    const initEditor = async () => {
+      const html = decodeBase64(reportBase64)
+      if (!html) return
 
-    const blocks = parseDiffHtmlToBlocks(html)
-    const diffCount = blocks.filter((b) => b.type === 'diffBlock').length
-    setStats({ total: diffCount, decided: 0 })
+      const blocks = await parseDiffHtmlToBlocks(html)
+      const diffCount = blocks.filter((b) => b.type === 'diffBlock').length
+      if (mountedRef.current) setStats({ total: diffCount, decided: 0 })
 
-    const holderEl = document.getElementById(holderId)
-    if (holderEl) holderEl.innerHTML = ''
+      const holderEl = document.getElementById(holderId)
+      if (holderEl) holderEl.innerHTML = ''
 
-    const editor = new EditorJS({
-      holder: holderId,
-      tools: {
-        paragraph: {
-          class: Paragraph as any,
-          config: { preserveBlank: true },
+      const [{ default: EditorJS }, { default: Paragraph }, { default: DiffBlockTool }] = await Promise.all([
+        import('@editorjs/editorjs'),
+        import('@editorjs/paragraph'),
+        import('../editor/DiffBlockTool')
+      ]);
+
+      const editor = new EditorJS({
+        holder: holderId,
+        tools: {
+          paragraph: {
+            class: Paragraph as any,
+            config: { preserveBlank: true },
+          },
+          diffBlock: {
+            class: DiffBlockTool as any,
+            config: { onDecisionChange },
+          },
         },
-        diffBlock: {
-          class: DiffBlockTool as any,
-          config: { onDecisionChange },
+        data: {
+          time: Date.now(),
+          blocks,
+          version: '2.31.4',
         },
-      },
-      data: {
-        time: Date.now(),
-        blocks,
-        version: '2.31.4',
-      },
-      readOnly: false,  // must be false so DiffBlock buttons are clickable
-      minHeight: 100,
-      onReady: () => {
-        if (mountedRef.current) setIsReady(true)
-      },
-    })
+        readOnly: false,
+        minHeight: 100,
+        onReady: () => {
+          if (mountedRef.current) setIsReady(true)
+        },
+      })
 
-    editorRef.current = editor
+      if (mountedRef.current) {
+        editorRef.current = editor
+      } else {
+        try { editor.destroy?.() } catch { /* ignore */ }
+      }
+    }
+
+    initEditor()
 
     return () => {
       mountedRef.current = false
-      try { editor.destroy?.() } catch { /* ignore */ }
-      editorRef.current = null
+      if (editorRef.current) {
+        try { editorRef.current.destroy?.() } catch { /* ignore */ }
+        editorRef.current = null
+      }
       setIsReady(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

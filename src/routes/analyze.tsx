@@ -16,6 +16,7 @@ import { decodeBase64Async } from '../utils/base64'
 import DocumentUploader from '../components/clause-analysis/DocumentUploader'
 import ClauseForm from '../components/clause-analysis/ClauseForm'
 import AnalysisResults from '../components/clause-analysis/AnalysisResults'
+import ComplianceReport from '../components/clause-analysis/ComplianceReport'
 
 // Lazy-load DocumentPreview to prevent EditorJS SSR error
 const DocumentPreview = lazy(() => import('../components/clause-analysis/DocumentPreview'))
@@ -111,6 +112,8 @@ function AnalyzePage() {
     if (isAnalyzing || result) setRightTab('analysis')
   }, [isAnalyzing, result])
 
+
+
   const decisionStats = useMemo(() => getDecisionStats(editorData), [editorData])
   const canExport = isReportMode && decisionStats.total > 0 && decisionStats.total === decisionStats.decided
 
@@ -196,7 +199,7 @@ function AnalyzePage() {
         decodedHtml = await decodeBase64Async(data.report_md_base64)
 
         if (decodedHtml && !data.analysis_summary?.length) {
-          const parsedSummary = parseDiffHtmlToAnalysisSummary(decodedHtml)
+          const parsedSummary = await parseDiffHtmlToAnalysisSummary(decodedHtml)
           if (parsedSummary.length > 0) {
             enrichedData = { ...data, analysis_summary: parsedSummary }
           }
@@ -505,29 +508,38 @@ function AnalyzePage() {
               </div>
             )}
 
-            {/* Document tab — always mounted to preserve EditorJS instance */}
-            <div className={`flex-1 overflow-y-auto p-4 ${(result || isAnalyzing) && rightTab === 'analysis' ? 'hidden' : ''}`}>
-              <Suspense fallback={<div className="text-sm text-slate-500">Loading document…</div>}>
-                <DocumentPreview
-                  editorData={editorData}
-                  onChange={setEditorData}
-                  documentTitle={documentTitle}
-                  onTitleChange={setDocumentTitle}
-                  isReportMode={isReportMode}
-                  decisionStats={decisionStats}
-                  reportHtml={reportHtml}
-                />
-              </Suspense>
-            </div>
+            {/* Document tab — unmounted when Analysis tab is active to free EditorJS DOM */}
+            {rightTab !== 'analysis' && (
+              <div className="flex-1 overflow-y-auto p-4">
+                <Suspense fallback={<div className="text-sm text-slate-500">Loading document…</div>}>
+                  <DocumentPreview
+                    editorData={editorData}
+                    onChange={setEditorData}
+                    documentTitle={documentTitle}
+                    onTitleChange={setDocumentTitle}
+                    isReportMode={isReportMode}
+                    decisionStats={decisionStats}
+                    reportHtml={reportHtml}
+                  />
+                </Suspense>
+              </div>
+            )}
 
             {/* Analysis tab */}
             {rightTab === 'analysis' && (result || isAnalyzing) && (
               <div className="flex-1 overflow-y-auto p-4">
-                <AnalysisResults
-                  result={result}
-                  isLoading={isAnalyzing}
-                  clauseCount={clauses.filter((c) => c.title.trim()).length || 4}
-                />
+                {result?.summary_json
+                  ? <ComplianceReport
+                      result={result}
+                      isLoading={isAnalyzing}
+                      clauseCount={clauses.filter((c) => c.title.trim()).length || 4}
+                    />
+                  : <AnalysisResults
+                      result={result}
+                      isLoading={isAnalyzing}
+                      clauseCount={clauses.filter((c) => c.title.trim()).length || 4}
+                    />
+                }
               </div>
             )}
 

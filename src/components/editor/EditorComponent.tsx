@@ -1,4 +1,4 @@
-import EditorJS from "@editorjs/editorjs";
+import type EditorJS from "@editorjs/editorjs";
 import { useEffect, useRef, useCallback, useState } from "react";
 import { getEditorTools } from "./tools";
 
@@ -114,7 +114,7 @@ export default function EditorComponent({
     if (editorRef.current) {
       try {
         if (typeof editorRef.current.destroy === "function") {
-          await editorRef.current.destroy();
+          editorRef.current.destroy();
         }
       } catch { /* ignore */ }
       editorRef.current = null;
@@ -147,9 +147,14 @@ export default function EditorComponent({
       // Suppress onChange during initial render
       suppressOnChangeRef.current = true;
 
+      // Dynamic import — keeps EditorJS out of the SSR module graph entirely!!
+      const { default: EditorJS } = await import("@editorjs/editorjs");
+
+      const tools = await getEditorTools();
+
       const editor = new EditorJS({
         holder: editorId,
-        tools: getEditorTools() as any,
+        tools: tools as any,
         data: startData,
         readOnly,
         minHeight,
@@ -214,16 +219,6 @@ export default function EditorComponent({
   // ── Sync externally-driven data (e.g. DOCX parse result, diff report) ─────
 
   const renderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingDataRef = useRef<EditorData | null>(null);
-  const visibilityPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Check if the editor container is actually visible (not in a hidden tab)
-  const isContainerVisible = useCallback(() => {
-    const el = containerRef.current;
-    if (!el) return false;
-    // offsetParent is null when element or ancestor has display:none
-    return el.offsetParent !== null;
-  }, []);
 
   const doRender = useCallback(async (capturedData: EditorData) => {
     if (!mountedRef.current || !editorRef.current) return;
@@ -231,7 +226,7 @@ export default function EditorComponent({
       suppressOnChangeRef.current = true;
       await new Promise((r) => requestAnimationFrame(r));
       if (!mountedRef.current || !editorRef.current) return;
-      await editorRef.current.clear();
+      editorRef.current.clear();
       // Double-rAF guarantees a paint frame between clear() and render()
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       if (!mountedRef.current || !editorRef.current) return;
@@ -247,13 +242,12 @@ export default function EditorComponent({
     }
   }, [applyAlignmentFromTunes]);
 
+  // Sync data changes into EditorJS
   useEffect(() => {
     if (!isReady || !editorRef.current) return;
 
     if (!data || !data.blocks?.length) {
       if (renderTimerRef.current) { clearTimeout(renderTimerRef.current); renderTimerRef.current = null; }
-      if (visibilityPollRef.current) { clearInterval(visibilityPollRef.current); visibilityPollRef.current = null; }
-      pendingDataRef.current = null;
       if (lastDataTimeRef.current !== 0) {
         lastDataTimeRef.current = 0;
         try { editorRef.current?.clear(); } catch { /* ignore */ }
@@ -264,34 +258,7 @@ export default function EditorComponent({
     if (data.time === lastDataTimeRef.current) return;
 
     if (renderTimerRef.current) clearTimeout(renderTimerRef.current);
-    if (visibilityPollRef.current) { clearInterval(visibilityPollRef.current); visibilityPollRef.current = null; }
-
-    const capturedData = data;
-
-    // If the editor is hidden (e.g. user is on a different tab), defer rendering
-    // until it becomes visible. This prevents the massive EditorJS render() freeze
-    // from blocking the UI while the user is looking at the Analysis tab.
-    if (!isContainerVisible()) {
-      pendingDataRef.current = capturedData;
-      visibilityPollRef.current = setInterval(() => {
-        if (!mountedRef.current) {
-          if (visibilityPollRef.current) { clearInterval(visibilityPollRef.current); visibilityPollRef.current = null; }
-          return;
-        }
-        if (isContainerVisible() && pendingDataRef.current) {
-          const pending = pendingDataRef.current;
-          pendingDataRef.current = null;
-          if (visibilityPollRef.current) { clearInterval(visibilityPollRef.current); visibilityPollRef.current = null; }
-          renderTimerRef.current = setTimeout(() => doRender(pending), 80);
-        }
-      }, 200);
-      return () => {
-        if (visibilityPollRef.current) { clearInterval(visibilityPollRef.current); visibilityPollRef.current = null; }
-      };
-    }
-
-    pendingDataRef.current = null;
-    renderTimerRef.current = setTimeout(() => doRender(capturedData), 80);
+    renderTimerRef.current = setTimeout(() => doRender(data), 80);
 
     return () => {
       if (renderTimerRef.current) { clearTimeout(renderTimerRef.current); renderTimerRef.current = null; }
@@ -323,7 +290,7 @@ export default function EditorComponent({
     };
     container.addEventListener('diff-decision-change', handler);
     return () => container.removeEventListener('diff-decision-change', handler);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady]);
 
   // ── Render ─────────────────────────────────────────────────────────────────

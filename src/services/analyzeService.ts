@@ -4,46 +4,6 @@ import type { Clause, AnalysisResponse } from '../types/clauseAnalysis'
 
 const BASE_URL = (import.meta as any).env?.VITE_API_URL || 'https://docmonk-production.up.railway.app'
 
-// ─── Resume-loop helper ───────────────────────────────────────────────────────
-
-/**
- * If the initial analyze response has can_resume=true, the backend still has
- * more data to send (analysis_summary, summary_md_base64, etc.).
- * Keep calling POST /v1/jobs/{jobId}/resume until can_resume is false or we
- * run out of retries. Merges each response into the accumulated data object.
- */
-async function resumeUntilComplete(
-  data: Record<string, any>,
-  signal: AbortSignal,
-  maxRetries = 10,
-): Promise<Record<string, any>> {
-  let merged = { ...data }
-  let retries = 0
-
-  while (merged.can_resume && merged.job_id && retries < maxRetries) {
-    retries++
-    await new Promise((r) => setTimeout(r, 800)) // brief back-off between retries
-
-    const res = await fetch(`${BASE_URL}/v1/jobs/${merged.job_id}/resume`, {
-      method: 'POST',
-      signal,
-    })
-    if (!res.ok) break
-
-    const chunk = await res.json()
-    console.log(`[DocMonk] resume #${retries} keys:`, Object.keys(chunk).join(', '))
-
-    // Merge: newer chunk fields overwrite, but don't clear existing values with null/undefined
-    for (const key of Object.keys(chunk)) {
-      if (chunk[key] !== null && chunk[key] !== undefined) {
-        merged[key] = chunk[key]
-      }
-    }
-  }
-
-  return merged
-}
-
 // 2-minute timeout — AI analysis can take 10-60s depending on document size
 const ANALYZE_TIMEOUT_MS = 120_000
 
@@ -135,22 +95,7 @@ export async function analyzeDocument(
       throw new Error(text || `Analysis failed with status ${res.status}`)
     }
 
-    let data = await res.json()
-
-    // Debug: log all API keys and short-circuit base64 blobs so nothing is hidden
-    console.log('[DocMonk] API keys:', Object.keys(data).join(', '))
-
-    // If the backend signals more data is available, fetch it now
-    if (data.can_resume && data.job_id) {
-      data = await resumeUntilComplete(data, controller.signal)
-      console.log('[DocMonk] after resume, keys:', Object.keys(data).join(', '))
-    }
-    const preview: Record<string, unknown> = {}
-    for (const k of Object.keys(data)) {
-      const v = (data as any)[k]
-      preview[k] = typeof v === 'string' && v.length > 80 ? `[base64 ${v.length}ch]` : v
-    }
-    console.log('[DocMonk] API values:', preview)
+    const data = await res.json()
 
     // Normalize analysis_summary from alternative field names the API might use
     if (!data.analysis_summary?.length) {
@@ -163,6 +108,52 @@ export async function analyzeDocument(
     // Normalize summary_md_base64 from alternative field names
     if (!data.summary_md_base64) {
       data.summary_md_base64 = data.summary_base64 ?? data.summary_md ?? data.md_summary ?? null
+    }
+
+    // DEV ONLY: inject mock summary_json to test ComplianceReport UI
+    if (import.meta.env.DEV && !data.summary_json) {
+      data.summary_json = {
+        compliance_score: 63,
+        score_status: 'Needs Attention',
+        stats: { total: 9, match: 3, violation: 4, partial: 1, not_found: 1 },
+        agreement: { type: 'Commercial Rental Agreement', date: '2024-03-01', city: 'Mumbai', state: 'Maharashtra', party_a: 'Rajesh Properties Pvt Ltd', party_b: 'Infosys Technologies Ltd' },
+        critical_issue_ids: ['governing_law_clause', 'security_deposit_clause', 'subletting_clause', 'termination_notice_clause'],
+        clauses: [
+          { index: 1, clause_id: 'rent_clause', clause_title: 'Monthly Rent', clause_value: 'The monthly rent shall be ₹3,00,000 payable on or before the 5th of each month.', category: 'Financial Risk', risk_level: 'MEDIUM', result: 'MATCH', reason: 'Rent amount and payment schedule clearly specified and compliant.', relevant_text: 'The monthly rent shall be ₹3,00,000 payable on or before the 5th of each month.', ai_added_text: null, parties_obligated: ['Tenant'], missing_values: [], binding_strength: 'STRONG', key_dates_durations: ['5th of each month'] },
+          { index: 2, clause_id: 'lease_term_clause', clause_title: 'Lease Term', clause_value: 'The lease shall commence on 1st March 2024 and expire on 28th February 2027.', category: 'Operational Risk', risk_level: 'MEDIUM', result: 'MATCH', reason: 'Lease commencement, expiry, and total duration clearly defined.', relevant_text: 'The lease shall commence on 1st March 2024 and expire on 28th February 2027.', ai_added_text: null, parties_obligated: ['Landlord', 'Tenant'], missing_values: [], binding_strength: 'STRONG', key_dates_durations: ['1st March 2024 — commencement', '28th February 2027 — expiry'] },
+          { index: 3, clause_id: 'security_deposit_clause', clause_title: 'Security Deposit', clause_value: 'Tenant shall deposit 12 months advance rent as security deposit.', category: 'Financial Risk', risk_level: 'HIGH', result: 'VIOLATION', reason: '12-month deposit exceeds the 6-month statutory cap under Maharashtra Rent Control Act 1999.', relevant_text: 'Tenant shall deposit 12 months advance rent of ₹36,00,000 as security deposit.', ai_added_text: 'Tenant shall deposit 6 months advance rent of ₹18,00,000 as security deposit prior to possession, in compliance with Maharashtra Rent Control Act 1999.', parties_obligated: ['Tenant'], missing_values: [], binding_strength: 'STRONG', key_dates_durations: ['prior to possession'] },
+          { index: 4, clause_id: 'subletting_clause', clause_title: 'Subletting & Assignment', clause_value: 'Tenant may sublet without prior consent of the landlord.', category: 'Legal Risk', risk_level: 'HIGH', result: 'VIOLATION', reason: 'Unconditional subletting right is void under Section 15 of the Transfer of Property Act 1882.', relevant_text: 'Tenant may sublet or assign the premises without requiring prior consent of the landlord.', ai_added_text: 'Tenant shall not sublet, assign, or part with possession without prior written consent of the Landlord.', parties_obligated: ['Tenant'], missing_values: [], binding_strength: 'STRONG', key_dates_durations: [] },
+          { index: 5, clause_id: 'termination_notice_clause', clause_title: 'Termination Notice Period', clause_value: 'Either party may terminate by giving 30 days written notice.', category: 'Legal Risk', risk_level: 'HIGH', result: 'VIOLATION', reason: '30-day notice is below the 90-day statutory minimum for commercial tenancies in Maharashtra.', relevant_text: 'Either party may terminate this agreement by giving 30 days written notice.', ai_added_text: 'Either party may terminate by giving 90 days written notice, per Maharashtra Rent Control Act 1999.', parties_obligated: ['Landlord', 'Tenant'], missing_values: [], binding_strength: 'STRONG', key_dates_durations: [] },
+          { index: 6, clause_id: 'rent_escalation_clause', clause_title: 'Rent Escalation', clause_value: 'Rent shall escalate by 10% annually.', category: 'Financial Risk', risk_level: 'HIGH', result: 'PARTIALLY_SATISFIED', reason: 'Escalation rate specified but no cap or CPI-linked ceiling defined.', relevant_text: 'Rent shall escalate by 10% annually on each anniversary.', ai_added_text: 'Rent shall escalate by 5% annually, subject to a maximum cumulative escalation of 15% over the lease term.', parties_obligated: ['Tenant'], missing_values: ['escalation cap'], binding_strength: 'MODERATE', key_dates_durations: ['annually on each anniversary'] },
+          { index: 7, clause_id: 'stamp_duty_clause', clause_title: 'Stamp Duty & Registration', clause_value: '', category: 'Process Risk', risk_level: 'LOW', result: 'NOT_FOUND', reason: 'No provision for stamp duty or mandatory registration under Maharashtra Stamp Act.', relevant_text: null, ai_added_text: 'This agreement shall be executed on stamp paper and registered with the Sub-Registrar within 4 months of execution.', parties_obligated: ['Landlord', 'Tenant'], missing_values: ['stamp duty provision'], binding_strength: 'VAGUE', key_dates_durations: [] },
+          { index: 8, clause_id: 'governing_law_clause', clause_title: 'Governing Law & Jurisdiction', clause_value: 'Disputes subject to jurisdiction of Bangalore courts.', category: 'Legal Risk', risk_level: 'HIGH', result: 'VIOLATION', reason: 'Property is in Mumbai; Bangalore courts lack mandatory territorial jurisdiction.', relevant_text: 'disputes shall be subject to jurisdiction of Bangalore courts.', ai_added_text: 'Disputes shall be subject to the exclusive jurisdiction of courts in Mumbai, Maharashtra.', parties_obligated: ['Landlord', 'Tenant'], missing_values: [], binding_strength: 'STRONG', key_dates_durations: [] },
+          { index: 9, clause_id: 'maintenance_clause', clause_title: 'Maintenance & Repairs', clause_value: 'Tenant shall maintain premises; major structural repairs are landlord\'s responsibility.', category: 'Operational Risk', risk_level: 'MEDIUM', result: 'MATCH', reason: 'Responsibility allocated clearly between parties.', relevant_text: 'Major structural repairs are the responsibility of the landlord.', ai_added_text: null, parties_obligated: ['Landlord', 'Tenant'], missing_values: [], binding_strength: 'WEAK', key_dates_durations: [] },
+        ],
+        category_breakdown: [
+          { name: 'Legal Risk', risk_level: 'HIGH', total: 4, compliant: 1, issues: 3, pass_rate: 25 },
+          { name: 'Financial Risk', risk_level: 'HIGH', total: 3, compliant: 1, issues: 2, pass_rate: 33 },
+          { name: 'Operational Risk', risk_level: 'MEDIUM', total: 2, compliant: 2, issues: 0, pass_rate: 100 },
+          { name: 'Process Risk', risk_level: 'LOW', total: 1, compliant: 0, issues: 1, pass_rate: 0 },
+        ],
+        jurisdiction: {
+          jurisdiction: 'Maharashtra, India',
+          agreement_type: 'Commercial Rental Agreement',
+          applicable_laws: ['Maharashtra Rent Control Act 1999', 'Transfer of Property Act 1882', 'Indian Contract Act 1872', 'Maharashtra Stamp Act 1958'],
+          checklist: [
+            { item: 'Agreement registered with Sub-Registrar of Assurances', required: true },
+            { item: 'Stamp duty paid per Maharashtra Stamp Act schedule', required: true },
+            { item: 'Security deposit within statutory 6-month cap', required: true },
+            { item: 'Minimum 90-day termination notice', required: true },
+            { item: 'Jurisdiction of courts at property location', required: true },
+            { item: 'GST registration and TDS provisions included', required: false },
+          ],
+        },
+        timeline: [
+          { clause_title: 'Lease Term', item: '1st March 2024 — commencement' },
+          { clause_title: 'Lease Term', item: '28th February 2027 — expiry' },
+          { clause_title: 'Monthly Rent', item: '5th of each month — payment due' },
+        ],
+      }
     }
 
     return data as AnalysisResponse
