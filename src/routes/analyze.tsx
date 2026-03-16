@@ -99,6 +99,7 @@ function AnalyzePage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [result, setResult] = useState<AnalysisResponse | null>(null)
   const [reportHtml, setReportHtml] = useState<string | null>(null)
+  const [summaryHtml, setSummaryHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [rightTab, setRightTab] = useState<'editor' | 'analysis'>('editor')
   const [isDiffParsing, setIsDiffParsing] = useState(false)
@@ -176,8 +177,6 @@ function AnalyzePage() {
     setClauses((prev) => prev.filter((c) => c.id !== id))
   }, [])
 
-  const replaceClauses = useCallback((next: Clause[]) => setClauses(next), [])
-
   // ── Analysis ───────────────────────────────────────────────────────────────
 
   const handleAnalyze = useCallback(async () => {
@@ -187,7 +186,7 @@ function AnalyzePage() {
     if (!editorData?.blocks?.length && !uploadedFile) {
       setError('Please upload a document or type your contract in the editor.'); return
     }
-    setIsAnalyzing(true); setResult(null)
+    setIsAnalyzing(true); setResult(null); setIsReportMode(false)
     try {
       const data = await analyzeDocument(uploadedFile, editorData, clauses, context)
 
@@ -206,9 +205,16 @@ function AnalyzePage() {
         }
       }
 
+      // Decode summary_md_base64 if present (separate summary HTML, distinct from diff report)
+      let decodedSummary: string | null = null
+      if (enrichedData.summary_md_base64) {
+        decodedSummary = await decodeBase64Async(enrichedData.summary_md_base64)
+      }
+
+      // All state updates fired together — no dependency on React batching order
       setResult(enrichedData)
       setIsAnalyzing(false)
-
+      if (decodedSummary) setSummaryHtml(decodedSummary)
       if (decodedHtml) {
         setReportHtml(decodedHtml)
         // Store for lazy parsing — diff blocks only needed when user clicks Document tab
@@ -252,39 +258,47 @@ function AnalyzePage() {
 
 
   const handleTabChange = useCallback(async (tab: 'editor' | 'analysis') => {
-    setRightTab(tab)
-    // Lazily parse the diff blocks only when the user first opens the Document tab
-    if (tab === 'editor' && pendingDiffHtmlRef.current && !isReportMode && !isDiffParsing) {
+    // When switching to the Document tab with a pending diff, parse FIRST then switch.
+    // This ensures EditorComponent mounts with the already-merged data so initEditor
+    // never sees the original content — eliminating the race that caused both to appear.
+    if (tab === 'editor' && pendingDiffHtmlRef.current && !isDiffParsing) {
       const html = pendingDiffHtmlRef.current
       pendingDiffHtmlRef.current = null
       setIsDiffParsing(true)
       setHasPendingDiff(false)
       try {
-        const blocks = await parseDiffHtmlToBlocks(html)
-        if (blocks.length > 0) {
-          setEditorData({ time: Date.now(), blocks, version: '2.31.4' })
+        const allBlocks = await parseDiffHtmlToBlocks(html)
+        if (allBlocks.length > 0) {
+          // Use allBlocks as the sole source of truth — no merging with original content.
+          // Any merging logic caused the original document to be appended after the diff.
+          setEditorData({ time: Date.now(), blocks: allBlocks, version: '2.31.4' })
         }
         setIsReportMode(true)
       } finally {
         setIsDiffParsing(false)
       }
+      // Switch AFTER data is ready — EditorComponent mounts with merged content directly
+      setRightTab(tab)
+    } else {
+      setRightTab(tab)
     }
-  }, [isReportMode, isDiffParsing])
+  }, [isDiffParsing])
 
-  const handleReset = useCallback(() => {
+  const resetState = useCallback((clearTitle = false) => {
     setResult(null); setIsReportMode(false)
     setEditorData(null); setUploadedFile(null)
-    setReportHtml(null); setError(null); setRightTab('editor')
+    if (clearTitle) setDocumentTitle('')
+    setReportHtml(null); setSummaryHtml(null); setError(null); setRightTab('editor')
     pendingDiffHtmlRef.current = null; setHasPendingDiff(false)
     setClauses([newClause()]); setContext('')
   }, [])
 
-  const handleCompleted = useCallback(() => {
-    handleReset()
-  }, [handleReset])
+  const handleReset = useCallback(() => resetState(false), [resetState])
+  const handleCompleted = useCallback(() => resetState(true), [resetState])
 
   const isReady = !!(uploadedFile || editorData?.blocks?.length)
   const validClauseCount = clauses.filter((c) => c.title.trim() && c.value.trim()).length
+  const namedClauseCount = clauses.filter((c) => c.title.trim()).length || 4
 
   return (
     <div className="h-screen flex flex-col bg-slate-50 overflow-hidden">
@@ -429,7 +443,7 @@ function AnalyzePage() {
                   onChange={updateClause}
                   onRemove={removeClause}
                   onClearAll={() => setClauses([newClause()])}
-                  onReplace={replaceClauses}
+                  onReplace={setClauses}
                 />
               </SideCard>
 
@@ -499,9 +513,9 @@ function AnalyzePage() {
                     <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                   </svg>
                   Summary Analysis
-                  {result?.analysis_summary?.length ? (
+                  {(result?.analysis_summary?.length || result?.summary_json?.stats?.total) ? (
                     <span className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 ${rightTab === 'analysis' ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
-                      {result.analysis_summary.length}
+                      {result?.analysis_summary?.length || result?.summary_json?.stats?.total}
                     </span>
                   ) : null}
                 </button>
@@ -513,6 +527,7 @@ function AnalyzePage() {
               <div className="flex-1 overflow-y-auto p-4">
                 <Suspense fallback={<div className="text-sm text-slate-500">Loading document…</div>}>
                   <DocumentPreview
+                    key={result ? (result.report_md_base64?.slice(-20) || 'analyzed') : 'initial'}
                     editorData={editorData}
                     onChange={setEditorData}
                     documentTitle={documentTitle}
@@ -529,16 +544,30 @@ function AnalyzePage() {
             {rightTab === 'analysis' && (result || isAnalyzing) && (
               <div className="flex-1 overflow-y-auto p-4">
                 {result?.summary_json
-                  ? <ComplianceReport
-                      result={result}
-                      isLoading={isAnalyzing}
-                      clauseCount={clauses.filter((c) => c.title.trim()).length || 4}
+                  ? /* JSON response → structured compliance dashboard */
+                  <ComplianceReport
+                    result={result}
+                    isLoading={isAnalyzing}
+                    clauseCount={namedClauseCount}
+                  />
+                  : result && summaryHtml
+                    ? /* summary_md_base64 response → decoded summary HTML */
+                    <div
+                      className="prose prose-sm max-w-none"
+                      dangerouslySetInnerHTML={{ __html: summaryHtml }}
                     />
-                  : <AnalysisResults
-                      result={result}
-                      isLoading={isAnalyzing}
-                      clauseCount={clauses.filter((c) => c.title.trim()).length || 4}
-                    />
+                    : result?.report_md_base64 && reportHtml
+                      ? /* report_md_base64 response → decoded diff report HTML */
+                      <div
+                        className="prose prose-sm max-w-none"
+                        dangerouslySetInnerHTML={{ __html: reportHtml }}
+                      />
+                      : /* Fallback → legacy clause-by-clause results */
+                      <AnalysisResults
+                        result={result}
+                        isLoading={isAnalyzing}
+                        clauseCount={namedClauseCount}
+                      />
                 }
               </div>
             )}

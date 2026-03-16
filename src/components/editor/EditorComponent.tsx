@@ -34,6 +34,7 @@ export default function EditorComponent({
   const editorRef = useRef<EditorJS | null>(null);
   const mountedRef = useRef(false);
   const initializingRef = useRef(false);
+  const mountGenRef = useRef(0);
   const lastDataTimeRef = useRef<number>(0);
   const onChangeRef = useRef(onChange);
   // Suppresses onChange during programmatic render / alignment application
@@ -130,11 +131,12 @@ export default function EditorComponent({
   const initEditor = useCallback(async (initialData?: EditorData | null) => {
     if (initializingRef.current || !mountedRef.current) return;
     initializingRef.current = true;
+    const gen = mountGenRef.current;
 
     try {
       await cleanupEditor();
       await new Promise((r) => setTimeout(r, 50));
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || gen !== mountGenRef.current) return;
 
       const el = document.getElementById(editorId);
       if (el) el.innerHTML = "";
@@ -149,8 +151,16 @@ export default function EditorComponent({
 
       // Dynamic import — keeps EditorJS out of the SSR module graph entirely!!
       const { default: EditorJS } = await import("@editorjs/editorjs");
+      if (!mountedRef.current || gen !== mountGenRef.current) {
+        suppressOnChangeRef.current = false;
+        return;
+      }
 
       const tools = await getEditorTools();
+      if (!mountedRef.current || gen !== mountGenRef.current) {
+        suppressOnChangeRef.current = false;
+        return;
+      }
 
       const editor = new EditorJS({
         holder: editorId,
@@ -207,8 +217,8 @@ export default function EditorComponent({
 
   useEffect(() => {
     mountedRef.current = true;
-    const currentData = data;
-    initEditor(currentData);
+    mountGenRef.current += 1;
+    initEditor(data);
     return () => {
       mountedRef.current = false;
       cleanupEditor();
@@ -225,17 +235,25 @@ export default function EditorComponent({
     try {
       suppressOnChangeRef.current = true;
       await new Promise((r) => requestAnimationFrame(r));
-      if (!mountedRef.current || !editorRef.current) return;
+      if (!mountedRef.current || !editorRef.current) {
+        suppressOnChangeRef.current = false;
+        return;
+      }
       editorRef.current.clear();
       // Double-rAF guarantees a paint frame between clear() and render()
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      if (!mountedRef.current || !editorRef.current) return;
+      if (!mountedRef.current || !editorRef.current) {
+        suppressOnChangeRef.current = false;
+        return;
+      }
       await editorRef.current.render(capturedData as any);
       lastDataTimeRef.current = capturedData.time;
       // Yield before alignment to let render paint first
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       if (mountedRef.current && editorRef.current) {
         applyAlignmentFromTunes(editorRef.current);
+      } else {
+        suppressOnChangeRef.current = false;
       }
     } catch {
       suppressOnChangeRef.current = false;

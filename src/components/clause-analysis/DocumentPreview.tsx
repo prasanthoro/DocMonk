@@ -16,8 +16,8 @@ export default function DocumentPreview({
   isReportMode = false, decisionStats, reportHtml,
 }: Props) {
   const blockCount = editorData?.blocks?.length ?? 0
-  const hasDiffBlocks = !!(editorData?.blocks?.some((b: any) => b.type === 'diffBlock'))
   const diffCount = editorData?.blocks?.filter((b: any) => b.type === 'diffBlock').length ?? 0
+  const hasDiffBlocks = diffCount > 0
   const total = decisionStats?.total ?? 0
   const decided = decisionStats?.decided ?? 0
   const pending = total - decided
@@ -43,7 +43,7 @@ export default function DocumentPreview({
     }
   }
 
-  // When API returns report HTML but EditorJS diff parsing produced 0 blocks, show iframe
+  // After analysis: show iframe only as fallback when no diff blocks were parsed
   const showIframe = isReportMode && !!reportHtml && !hasDiffBlocks
 
   return (
