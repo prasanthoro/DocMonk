@@ -35,7 +35,10 @@ export async function parseDiffHtmlToBlocks(html: string): Promise<EditorBlock[]
       const dataType = group.getAttribute('data-type') || 'unchanged'
 
       if (dataType === 'unchanged') {
+        // Try .diff-line.normal first; fall back to any .line-content in the group
+        // in case the API uses a different class name for unchanged lines.
         const normalEl = group.querySelector('.diff-line.normal .line-content')
+          ?? group.querySelector('.line-content')
         const text = (normalEl?.textContent || '').trim()
         if (text) {
           blocks.push({ type: 'paragraph', data: { text } })
@@ -46,14 +49,23 @@ export async function parseDiffHtmlToBlocks(html: string): Promise<EditorBlock[]
       // Changed: modified / partial / new
       const reason = group.querySelector('.reason-tooltip')?.textContent?.trim() || ''
 
-      const deletedEl = group.querySelector('.diff-line.deleted .line-content')
-      const oldTextEl = deletedEl?.querySelector('.old-text')
-      const deletedText = ((oldTextEl?.textContent || deletedEl?.textContent) ?? '').trim()
 
-      const addedEl = group.querySelector(
-        '.diff-line.added .line-content, .diff-line.new-clause .line-content',
-      )
-      const addedText = (addedEl?.textContent ?? '').trim()
+      // Use querySelectorAll to capture ALL deleted/added lines in the group,
+      // not just the first one (querySelector missed section headers on separate lines).
+      const deletedText = Array.from(group.querySelectorAll('.diff-line.deleted .line-content'))
+        .map(el => {
+          const oldText = el.querySelector('.old-text')
+          return ((oldText?.textContent || el.textContent) ?? '').trim()
+        })
+        .filter(Boolean)
+        .join('\n')
+
+      const addedText = Array.from(group.querySelectorAll(
+        '.diff-line.added .line-content, .diff-line.new-clause .line-content'
+      ))
+        .map(el => (el.textContent ?? '').trim())
+        .filter(Boolean)
+        .join('\n')
 
       const data: DiffBlockData = {
         diffType: dataType as DiffType,
@@ -110,14 +122,20 @@ export async function parseDiffHtmlToAnalysisSummary(html: string): Promise<Clau
       idx++
       const reason = group.querySelector('.reason-tooltip')?.textContent?.trim() || ''
 
-      const deletedEl = group.querySelector('.diff-line.deleted .line-content')
-      const oldTextEl = deletedEl?.querySelector('.old-text')
-      const deletedText = ((oldTextEl?.textContent || deletedEl?.textContent) ?? '').trim()
+      const deletedText = Array.from(group.querySelectorAll('.diff-line.deleted .line-content'))
+        .map(el => {
+          const oldText = el.querySelector('.old-text')
+          return ((oldText?.textContent || el.textContent) ?? '').trim()
+        })
+        .filter(Boolean)
+        .join('\n')
 
-      const addedEl = group.querySelector(
-        '.diff-line.added .line-content, .diff-line.new-clause .line-content',
-      )
-      const addedText = (addedEl?.textContent ?? '').trim()
+      const addedText = Array.from(group.querySelectorAll(
+        '.diff-line.added .line-content, .diff-line.new-clause .line-content'
+      ))
+        .map(el => (el.textContent ?? '').trim())
+        .filter(Boolean)
+        .join('\n')
 
       const resultMap: Record<string, ClauseAnalysis['result']> = {
         modified: 'VIOLATION',

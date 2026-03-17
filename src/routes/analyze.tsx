@@ -56,9 +56,48 @@ function resolveDocumentFromDiff(data: any) {
     const deletedText = typeof block?.data?.deletedText === 'string' ? block.data.deletedText.trim() : ''
     let finalText = ''
     if (diffType === 'new') {
-      finalText = decision === 'approved' ? addedText : ''
+      if (decision === 'approved') {
+        const reason = typeof block?.data?.reason === 'string' ? block.data.reason.trim() : ''
+        let headerText = ''
+        if (reason) {
+          // If reason already starts with a numbered section like "3. MONTHLY RENT:"
+          const numberedMatch = reason.match(/^(\d+\.\s+[A-Z][A-Z0-9\s&,()/-]+?:?)(?:\s|$)/)
+          if (numberedMatch) {
+            headerText = numberedMatch[1].endsWith(':') ? numberedMatch[1] : numberedMatch[1] + ':'
+          } else {
+            // Extract clause name: text before first dash, sentence-ending colon, or period-space
+            const clauseName = reason.split(/\s*[-–]\s+|\s*:\s+(?=[a-z])/)[0].trim()
+            if (clauseName.length > 0 && clauseName.length <= 60) {
+              // Scan backward through already-resolved blocks to find the last section number
+              let lastNum = 0
+              for (let ri = resolvedBlocks.length - 1; ri >= 0; ri--) {
+                const t = String(resolvedBlocks[ri]?.data?.text || '')
+                const m = t.match(/^(\d+)\.\s/)
+                if (m) { lastNum = parseInt(m[1]); break }
+              }
+              headerText = `${lastNum + 1}. ${clauseName.toUpperCase()}:`
+            }
+          }
+        }
+        finalText = headerText ? headerText + '\n' + addedText : addedText
+      }
     } else if (decision === 'approved') {
-      finalText = addedText
+      // Preserve section headers from deletedText that are missing from addedText.
+      // Normalise deletedText so headers always follow a newline, then extract them.
+      // Handles "fordamages.4. LEASE TERM:" by inserting a newline before digit-dot patterns.
+      const normDeleted = deletedText.replace(/(\.)(\d+\.\s+[A-Za-z])/g, '$1\n$2')
+      const HEADER_RE = /(?:^|\n)\s*(\d+\.\s+[A-Za-z][A-Za-z\s&,()/-]+:)/g
+      const allHeaders = [...normDeleted.matchAll(HEADER_RE)].map(m => m[1].trim())
+
+      const leadingHeader = allHeaders[0] && !/^\d+\./.test(addedText) ? allHeaders[0] : null
+      // Embedded headers beyond the first (multi-section diff blocks like "fordamages.4. LEASE TERM:")
+      const trailingHeaders = allHeaders.slice(leadingHeader ? 1 : 0)
+        .filter(h => !addedText.includes(h))
+
+      let text = addedText
+      if (leadingHeader) text = leadingHeader + '\n' + text
+      if (trailingHeaders.length > 0) text = text + '\n' + trailingHeaders.join('\n')
+      finalText = text
     } else if (decision === 'rejected') {
       finalText = deletedText
     }
@@ -68,14 +107,67 @@ function resolveDocumentFromDiff(data: any) {
 }
 
 function editorDataToPlainText(data: any): string {
-  return (Array.isArray(data?.blocks) ? data.blocks : [])
+  // Decode HTML entities that can appear in diff HTML text content (e.g. &amp; → &)
+  function decodeEntities(text: string): string {
+    return text
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&nbsp;/g, ' ').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+  }
+
+  function flattenListItems(items: any[], style: string, startIndex = 1): string[] {
+    const lines: string[] = []
+    items.forEach((item: any, i: number) => {
+      const text = decodeEntities(String(item?.content || item?.text || '').trim())
+      const prefix = style === 'ordered' ? `${startIndex + i}.` : '-'
+      if (text) lines.push(`${prefix} ${text}`)
+      if (Array.isArray(item?.items) && item.items.length > 0) {
+        lines.push(...flattenListItems(item.items, style))
+      }
+    })
+    return lines
+  }
+
+  const lines = (Array.isArray(data?.blocks) ? data.blocks : [])
     .map((b: any) => {
       if (!b || typeof b !== 'object') return ''
-      if (b.type === 'paragraph' || b.type === 'header') return String(b?.data?.text || '').trim()
+      if (b.type === 'paragraph' || b.type === 'header') {
+        let text = decodeEntities(String(b?.data?.text || '').trim())
+        // Double newline before embedded numbered section headers → visual gap between sections
+        // e.g. "damages.4. LEASE TERM:" → "damages.\n\n4. LEASE TERM:"
+        text = text.replace(/(\.)(\d+\.\s+[A-Za-z])/g, '$1\n\n$2')
+        // Newline after section header colon when directly followed by non-whitespace
+        // e.g. "3. SECURITY DEPOSIT:The Tenant" → "3. SECURITY DEPOSIT:\nThe Tenant"
+        text = text.replace(/(\d+\.\s+[A-Za-z][A-Za-z\s&,()/-]{1,50}:)([^\s\n])/g, '$1\n$2')
+        // Newline before sub-section labels after a sentence-ending period
+        // e.g. "possession.Interest:" → "possession.\nInterest:"
+        text = text.replace(/([.])([A-Z][a-z]+(?:\s+[A-Za-z]+)*:)/g, '$1\n$2')
+        // Newline before sub-section labels concatenated without any separator
+        // Requires 5+ lowercase chars on left and 5+ char label on right to avoid
+        // matching abbreviations or short words — e.g. "monthsRenewal:" → "months\nRenewal:"
+        text = text.replace(/([a-z]{5,})([A-Z][a-z]{4,}(?:\s+[A-Za-z]+)*:)/g, '$1\n$2')
+        // Upgrade single \n to \n\n before any numbered section header
+        // Handles merged diff blocks where sections are joined with a single newline
+        // e.g. "fordamages.\n4. LEASE TERM:" → "fordamages.\n\n4. LEASE TERM:"
+        text = text.replace(/([^\n])\n(\d+\.\s+[A-Za-z])/g, '$1\n\n$2')
+        return text
+      }
+      if (b.type === 'list') {
+        const style = b.data?.style || 'unordered'
+        const items = Array.isArray(b.data?.items) ? b.data.items : []
+        return flattenListItems(items, style).join('\n')
+      }
       return ''
     })
     .filter(Boolean)
-    .join('\n\n')
+
+  // Smart join: double newline before numbered section headers and ALL-CAPS headers,
+  // single newline between content lines within the same section.
+  // Previously used .join('\n\n') which caused double spacing on every line.
+  return lines.reduce((acc: string, line: string, i: number) => {
+    if (i === 0) return line
+    const isSectionHeader = /^\d+\.\s/.test(line) || /^[A-Z][A-Z &]+:\s*$/.test(line)
+    return acc + (isSectionHeader ? '\n\n' : '\n') + line
+  }, '')
 }
 
 function makeSafeFilename(name: string): string {
@@ -112,8 +204,6 @@ function AnalyzePage() {
   useEffect(() => {
     if (isAnalyzing || result) setRightTab('analysis')
   }, [isAnalyzing, result])
-
-
 
   const decisionStats = useMemo(() => getDecisionStats(editorData), [editorData])
   const canExport = isReportMode && decisionStats.total > 0 && decisionStats.total === decisionStats.decided
@@ -446,26 +536,12 @@ function AnalyzePage() {
                   onReplace={setClauses}
                 />
               </SideCard>
+              {/* Analysis Context Field wrapped in sidebar */}
 
-            </div>
+              <SideCard step={3} title="Analysis Context" done={!!context.trim()} optional>
+                <ContextPrompt value={context} onChange={setContext} onSubmit={handleAnalyze} isLoading={isAnalyzing} />
+              </SideCard>
 
-            {/* ── Sticky context prompt at bottom ── */}
-            <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 py-3">
-              <div className="flex items-center gap-2 mb-2.5">
-                <span className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${context.trim() ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-500'
-                  }`}>
-                  {context.trim() ? (
-                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                  ) : 3}
-                </span>
-                <span className={`text-xs font-bold flex-1 ${context.trim() ? 'text-emerald-800' : 'text-slate-700'}`}>
-                  Analysis Context
-                </span>
-                <span className="text-[10px] text-slate-400 border border-slate-200 rounded px-1.5 py-0.5">Optional</span>
-              </div>
-              <ContextPrompt value={context} onChange={setContext} onSubmit={handleAnalyze} isLoading={isAnalyzing} />
             </div>
 
           </aside>

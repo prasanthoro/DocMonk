@@ -187,7 +187,8 @@ export default function ClauseForm({ clauses, onAdd, onChange, onRemove, onClear
         ) : (
           clauses.map((clause, i) => (
             <ClauseRow
-              key={clause.id + i}
+              // key={clause.id + i}  // BUG: clause.id changes on every keystroke → remounts input → loses focus
+              key={i}
               clause={clause}
               index={i}
               isDuplicate={duplicateIds.has(clause.id.trim().toLowerCase())}
